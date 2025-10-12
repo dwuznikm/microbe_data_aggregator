@@ -58,6 +58,9 @@ class GenomeApp(tk.Tk):
 
         self.ref_var = tk.BooleanVar()
         ttk.Checkbutton(filter_frame, text="Reference genomes only", variable=self.ref_var).grid(row=0, column=0, padx=5)
+        
+        self.remove_dups_var = tk.BooleanVar()
+        ttk.Checkbutton(filter_frame, text="Remove duplicates", variable=self.remove_dups_var).grid(row=0, column=8, padx=5)
 
         tk.Label(filter_frame, text="Seq Length min:").grid(row=0, column=1, padx=5)
         self.seq_min = ttk.Entry(filter_frame, width=10)
@@ -75,10 +78,11 @@ class GenomeApp(tk.Tk):
         apply_btn.grid(row=0, column=7, padx=10)
 
         # --- Genome Table ---
-        columns = ("Accession", "Assembly Level", "Seq Length", "GC Content", "# Genes", "Source", "Reference", "Link")
+        columns = ("Accession", "Assembly Level", "Seq Length", "GC Content", "# Genes", "Source", "Reference", "Link", "Duplicate")
         self.genome_table = ttk.Treeview(self.genome_frame, columns=columns, show="headings")
+        
         for col in columns:
-            self.genome_table.heading(col, text=col)
+            self.genome_table.heading(col, text=col, command=lambda c=col: self.sort_treeview_column(self.genome_table, c, False))
             self.genome_table.column(col, width=120, anchor="w")
         self.genome_table.pack(expand=True, fill="both", padx=10, pady=10)
 
@@ -157,8 +161,34 @@ class GenomeApp(tk.Tk):
 
     # ---------------- Populate Genome Table ----------------
     def populate_genome_table(self, genomes):
+        
         for row in self.genome_table.get_children():
             self.genome_table.delete(row)
+
+        accession_counts = {}
+        for g in genomes:
+            acc = g.get("Accession")
+            if acc:
+                accession_counts[acc] = accession_counts.get(acc, 0) + 1
+
+        for genome in genomes:
+            acc = genome.get("Accession")
+            duplicate_flag = "Yes" if acc and accession_counts.get(acc, 0) > 1 else "No"
+            genome["Duplicate"] = duplicate_flag
+
+        if self.remove_dups_var.get():
+            seen = set()
+            filtered_genomes = []
+            for g in genomes:
+                acc = g.get("Accession")
+                if acc:
+                    if acc not in seen:
+                        filtered_genomes.append(g)
+                        seen.add(acc)
+                else:
+                    filtered_genomes.append(g)
+            genomes = filtered_genomes
+
 
         for genome in genomes:
             values = (
@@ -169,11 +199,11 @@ class GenomeApp(tk.Tk):
                 genome.get("# Genes", ""),
                 genome.get("Source", ""),
                 genome.get("Reference", ""),
-                genome.get("Link", "")
+                genome.get("Link", ""),
+                genome.get("Duplicate", "")
             )
             self.genome_table.insert("", "end", values=values)
 
-        # Adjust column widths
         self.adjust_column_widths(self.genome_table)
 
     # ---------------- Apply Filters ----------------
@@ -208,6 +238,25 @@ class GenomeApp(tk.Tk):
             filtered = filtered[:limit]
 
         self.populate_genome_table(filtered)
+
+    def sort_treeview_column(self, tree, col, reverse=False):
+        """
+        Sort the Treeview column when header is clicked.
+        tree: ttk.Treeview instance
+        col: column name (string)
+        reverse: bool, sort descending if True
+        """
+        data_list = [(tree.set(k, col), k) for k in tree.get_children('')]
+
+        try:
+            data_list.sort(key=lambda t: float(t[0]) if t[0] else float('-inf'), reverse=reverse)
+        except ValueError:
+            data_list.sort(key=lambda t: t[0], reverse=reverse)
+
+        for index, (val, k) in enumerate(data_list):
+            tree.move(k, '', index)
+
+        tree.heading(col, command=lambda: self.sort_treeview_column(tree, col, not reverse))
 
     # ---------------- Adjust Column Widths ----------------
     @staticmethod
