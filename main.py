@@ -1,7 +1,8 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import webbrowser
 from api_client import get_genome_summary, fetch_ncbi_taxonomy
+import csv
 
 
 class GenomeApp(tk.Tk):
@@ -73,7 +74,8 @@ class GenomeApp(tk.Tk):
         tk.Label(filter_frame, text="Limit rows:").grid(row=0, column=5, padx=5)
         self.limit_rows = ttk.Entry(filter_frame, width=10)
         self.limit_rows.grid(row=0, column=6, padx=5)
-
+        export_btn = ttk.Button(filter_frame, text="Export to CSV", command=self.export_to_csv)
+        export_btn.grid(row=0, column=9, padx=10)
         apply_btn = ttk.Button(filter_frame, text="Apply Filters", command=self.apply_filters)
         apply_btn.grid(row=0, column=7, padx=10)
 
@@ -257,6 +259,29 @@ class GenomeApp(tk.Tk):
             tree.move(k, '', index)
 
         tree.heading(col, command=lambda: self.sort_treeview_column(tree, col, not reverse))
+
+    def export_to_csv(self):
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            title="Save genome table as CSV"
+        )
+        if not file_path:
+            return
+
+        columns = self.genome_table["columns"]
+
+        try:
+            with open(file_path, mode="w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(columns)  # header
+                for row_id in self.genome_table.get_children():
+                    row = self.genome_table.item(row_id)["values"]
+                    writer.writerow(row)
+            messagebox.showinfo("Export Successful", f"Genome table saved to {file_path}")
+        except Exception as e:
+            messagebox.showerror("Export Failed", f"Could not save CSV:\n{e}")
+
 
     # ---------------- Adjust Column Widths ----------------
     @staticmethod
