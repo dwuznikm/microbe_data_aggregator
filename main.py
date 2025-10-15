@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import webbrowser
-from api_client import get_genome_summary, fetch_ncbi_taxonomy
+from api_client import get_genome_summary, fetch_ncbi_taxonomy, get_gene_summary
 import csv
 
 
@@ -53,6 +53,7 @@ class GenomeApp(tk.Tk):
         self.genome_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.genome_frame, text="Genome Info")
 
+
         # --- Filters ---
         filter_frame = ttk.Frame(self.genome_frame)
         filter_frame.pack(fill="x", padx=10, pady=5)
@@ -91,6 +92,21 @@ class GenomeApp(tk.Tk):
         # Bind double-click to open link
         self.genome_table.bind("<Double-1>", self.open_genome_link)
 
+                # --- Gene Tab ---
+        self.gene_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.gene_frame, text="Gene Info")
+
+        # --- Gene Table ---
+        gene_columns = ("Gene ID", "Description", "Symbol", "Locus", "SwissProt", "Assemblies", "Link", "Duplicate")
+        self.gene_table = ttk.Treeview(self.gene_frame, columns=gene_columns, show="headings")
+        for col in gene_columns:
+            self.gene_table.heading(col, text=col, command=lambda c=col: self.sort_treeview_column(self.gene_table, c, False))
+            self.gene_table.column(col, width=150, anchor="w")
+        self.gene_table.pack(expand=True, fill="both", padx=10, pady=10)
+
+        self.gene_table.bind("<Double-1>", self.on_gene_double_click)
+
+
     # ---------------- Genome Link ----------------
     def open_genome_link(self, event):
         selected_item = self.genome_table.selection()
@@ -107,6 +123,22 @@ class GenomeApp(tk.Tk):
             if url:
                 webbrowser.open(url)
 
+    # ---------------- Genome Link ----------------
+    def on_gene_double_click(self, event):
+        selected = self.gene_table.selection()
+        if not selected:
+            return
+        row = self.gene_table.item(selected[0])
+        col = self.gene_table.identify_column(event.x)
+        col_index = int(col.replace("#", "")) - 1
+        values = row["values"]
+
+        if col_index == 6:
+            link = values[col_index]
+            if link:
+                webbrowser.open(link)
+
+
     # ---------------- Search ----------------
     def search_taxid(self):
         taxid_str = self.taxid_entry.get().strip()
@@ -122,6 +154,7 @@ class GenomeApp(tk.Tk):
             selected_sources.append("NCBI")
         if self.ensembl_var.get():
             selected_sources.append("Ensembl")
+
         if not selected_sources:
             messagebox.showerror("No Database Selected", "Select at least one database to search.")
             return
@@ -130,13 +163,15 @@ class GenomeApp(tk.Tk):
         self.tax_tree.delete(*self.tax_tree.get_children())
         for row in self.genome_table.get_children():
             self.genome_table.delete(row)
+        for row in self.gene_table.get_children():
+            self.gene_table.delete(row)
         self.genome_data.clear()
 
         # --- Show progress ---
         self.progress_label.config(text=f"Fetching genomes from {', '.join(selected_sources)}...")
         self.update_idletasks()
 
-        # --- Fetch genome summary ---
+        # --- Fetch Genome Summary ---
         summary = get_genome_summary(taxid, sources=selected_sources)
         if not summary:
             messagebox.showerror("Error", f"Failed to fetch data for Tax ID {taxid}")
@@ -158,8 +193,19 @@ class GenomeApp(tk.Tk):
             return
         self.build_taxonomy_tree(tax_data)
 
-        # Update label to done
+        # --- Fetch Gene Data ---
+        self.progress_label.config(text="Fetching gene data...")
+        self.update_idletasks()
+        genes = get_gene_summary(taxid)
+
+        if not genes:
+            messagebox.showwarning("Warning", "No gene data found for this Tax ID.")
+            self.progress_label.config(text="")
+            return
+        self.populate_gene_table(genes)
+
         self.progress_label.config(text="Done")
+
 
     # ---------------- Populate Genome Table ----------------
     def populate_genome_table(self, genomes):
@@ -207,6 +253,39 @@ class GenomeApp(tk.Tk):
             self.genome_table.insert("", "end", values=values)
 
         self.adjust_column_widths(self.genome_table)
+
+    # ---------------- Populate Gene Table ----------------
+    def populate_gene_table(self, genes):
+        
+        for row in self.gene_table.get_children():
+            self.gene_table.delete(row)
+
+        gene_id_counts = {}
+        for g in genes:
+            gid = g.get("Gene ID")
+            if gid:
+                gene_id_counts[gid] = gene_id_counts.get(gid, 0) + 1
+
+        for gene in genes:
+            gid = gene.get("Gene ID")
+            duplicate_flag = "Yes" if gid and gene_id_counts.get(gid, 0) > 1 else "No"
+            gene["Duplicate"] = duplicate_flag
+
+        for g in genes:
+            values = (
+                g.get("Gene ID", ""),
+                g.get("Description", ""),
+                g.get("Symbol", ""),
+                g.get("Locus", ""),
+                g.get("SwissProt", ""),
+                g.get("Assemblies", ""),
+                g.get("Link", ""),
+                g.get("Duplicate", "")
+            )
+            self.gene_table.insert("", "end", values=values)
+
+        self.adjust_column_widths(self.gene_table)
+
 
     # ---------------- Apply Filters ----------------
     def apply_filters(self):
@@ -291,7 +370,7 @@ class GenomeApp(tk.Tk):
             max_width = max(
                 [len(str(tree.set(item, col))) for item in tree.get_children()] + [len(col)]
             )
-            pixel_width = min(max_width * 7 + 20, 500)  # cap at 500px
+            pixel_width = min(max_width * 6 + 20, 500)  # cap at 500px
             max_widths.append(pixel_width)
         for i, col in enumerate(tree["columns"]):
             tree.column(col, width=max_widths[i])

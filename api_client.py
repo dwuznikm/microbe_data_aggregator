@@ -58,6 +58,60 @@ def extract_ncbi_genome_metadata(report: dict):
         return None
 
 
+# --- NCBI Gene ---
+
+def fetch_ncbi_genes(tax_id: int):
+    url = f"{BASE_URL_NCBI}/gene/taxon/{tax_id}"
+    return fetch_json_from_api(url)
+
+
+def extract_ncbi_gene_metadata(report: dict):
+    try:
+        gene = report.get("gene", {})
+        gene_id = gene.get("gene_id")
+        symbol = gene.get("symbol", "")
+        description = gene.get("description", "")
+        locus_tag = gene.get("locus_tag", "")
+        swiss_prot = ", ".join(gene.get("swiss_prot_accessions", [])) or ""
+
+        assemblies = []
+        annotations = gene.get("annotations", [])
+        for ann in annotations:
+            acc = ann.get("assembly_accession")
+            date = ann.get("annotation_release_date", "")
+            assemblies.append(f"{acc} ({date})")
+
+        assemblies_str = "; ".join(assemblies) if assemblies else "-"
+
+        link = f"https://www.ncbi.nlm.nih.gov/gene/{gene_id}"
+
+        return {
+            "Gene ID": gene_id,
+            "Symbol": symbol,
+            "Locus": locus_tag,
+            "Description": description,
+            "SwissProt": swiss_prot,
+            "Assemblies": assemblies_str,
+            "Link": link,
+        }
+    except Exception as e:
+        print(f"Error extracting gene metadata: {e}")
+        return None
+
+
+def get_gene_summary(tax_id: int):
+    """Fetches NCBI gene data for given tax_id"""
+    data = fetch_ncbi_genes(tax_id)
+    if not data:
+        return []
+
+    genes = []
+    for r in data.get("reports", []):
+        meta = extract_ncbi_gene_metadata(r)
+        if meta:
+            genes.append(meta)
+    return genes
+
 # --- Ensembl ---
 
 def fetch_ensembl_genomes(tax_id: int):
