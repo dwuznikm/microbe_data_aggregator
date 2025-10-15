@@ -97,7 +97,7 @@ class GenomeApp(tk.Tk):
         self.notebook.add(self.gene_frame, text="Gene Info")
 
         # --- Gene Table ---
-        gene_columns = ("Gene ID", "Description", "Symbol", "Locus", "SwissProt", "Assemblies", "Link", "Duplicate")
+        gene_columns = ("Gene ID", "Type", "Description", "Symbol", "Locus", "Assemblies", "Link", "Duplicate")
         self.gene_table = ttk.Treeview(self.gene_frame, columns=gene_columns, show="headings")
         for col in gene_columns:
             self.gene_table.heading(col, text=col, command=lambda c=col: self.sort_treeview_column(self.gene_table, c, False))
@@ -274,10 +274,10 @@ class GenomeApp(tk.Tk):
         for g in genes:
             values = (
                 g.get("Gene ID", ""),
+                g.get("Type", ""),
                 g.get("Description", ""),
                 g.get("Symbol", ""),
                 g.get("Locus", ""),
-                g.get("SwissProt", ""),
                 g.get("Assemblies", ""),
                 g.get("Link", ""),
                 g.get("Duplicate", "")

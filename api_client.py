@@ -70,9 +70,9 @@ def extract_ncbi_gene_metadata(report: dict):
         gene = report.get("gene", {})
         gene_id = gene.get("gene_id")
         symbol = gene.get("symbol", "")
+        type = gene.get("type", "")
         description = gene.get("description", "")
         locus_tag = gene.get("locus_tag", "")
-        swiss_prot = ", ".join(gene.get("swiss_prot_accessions", [])) or ""
 
         assemblies = []
         annotations = gene.get("annotations", [])
@@ -87,10 +87,10 @@ def extract_ncbi_gene_metadata(report: dict):
 
         return {
             "Gene ID": gene_id,
+            "Type": type,
             "Symbol": symbol,
             "Locus": locus_tag,
             "Description": description,
-            "SwissProt": swiss_prot,
             "Assemblies": assemblies_str,
             "Link": link,
         }
