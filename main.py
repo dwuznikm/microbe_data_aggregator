@@ -61,24 +61,24 @@ class GenomeApp(tk.Tk):
         ttk.Checkbutton(filter_frame, text="Reference genomes only", variable=self.ref_var).grid(row=0, column=0, padx=5)
         
         self.remove_dups_var = tk.BooleanVar()
-        ttk.Checkbutton(filter_frame, text="Remove duplicates", variable=self.remove_dups_var).grid(row=0, column=8, padx=5)
+        ttk.Checkbutton(filter_frame, text="Remove duplicates", variable=self.remove_dups_var).grid(row=0, column=1, padx=5)
 
-        tk.Label(filter_frame, text="Seq Length min:").grid(row=0, column=1, padx=5)
+        tk.Label(filter_frame, text="Seq Length min:").grid(row=0, column=2, padx=5)
         self.seq_min = ttk.Entry(filter_frame, width=10)
-        self.seq_min.grid(row=0, column=2, padx=5)
+        self.seq_min.grid(row=0, column=3, padx=5)
 
-        tk.Label(filter_frame, text="Seq Length max:").grid(row=0, column=3, padx=5)
+        tk.Label(filter_frame, text="Seq Length max:").grid(row=0, column=4, padx=5)
         self.seq_max = ttk.Entry(filter_frame, width=10)
-        self.seq_max.grid(row=0, column=4, padx=5)
+        self.seq_max.grid(row=0, column=5, padx=5)
 
-        tk.Label(filter_frame, text="Limit rows:").grid(row=0, column=5, padx=5)
+        tk.Label(filter_frame, text="Limit rows:").grid(row=0, column=6, padx=5)
         self.limit_rows = ttk.Entry(filter_frame, width=10)
-        self.limit_rows.grid(row=0, column=6, padx=5)
+        self.limit_rows.grid(row=0, column=7, padx=5)
+        apply_btn = ttk.Button(filter_frame, text="Apply Filters", command=self.apply_filters)
+        apply_btn.grid(row=0, column=8, padx=10)
         export_btn = ttk.Button(filter_frame, text="Export to CSV", command=self.export_to_csv)
         export_btn.grid(row=0, column=9, padx=10)
-        apply_btn = ttk.Button(filter_frame, text="Apply Filters", command=self.apply_filters)
-        apply_btn.grid(row=0, column=7, padx=10)
-
+        
         # --- Genome Table ---
         columns = ("Accession", "Assembly Level", "Seq Length", "GC Content", "# Genes", "Source", "Reference", "Link", "Duplicate")
         self.genome_table = ttk.Treeview(self.genome_frame, columns=columns, show="headings")
