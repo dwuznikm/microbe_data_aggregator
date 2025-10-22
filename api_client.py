@@ -32,6 +32,7 @@ def fetch_ncbi_taxonomy(tax_id: int):
 def extract_ncbi_genome_metadata(report: dict):
     try:
         accession = report.get("accession")
+        source_database = report.get("source_database")
         assembly_info = report.get("assembly_info", {})
         assembly_stats = report.get("assembly_stats", {})
         annotation_info = report.get("annotation_info", {})
@@ -50,7 +51,7 @@ def extract_ncbi_genome_metadata(report: dict):
             "Seq Length": seq_len,
             "GC Content": gc_content,
             "# Genes": gene_count,
-            "Source": "NCBI",
+            "Source": source_database,
             "Reference": ref_genome,
             "Link": link,
         }
