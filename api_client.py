@@ -1,5 +1,10 @@
 import requests
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue, Empty
+import threading
+import time
+
 
 BASE_URL_NCBI = "https://api.ncbi.nlm.nih.gov/datasets/v2"
 BASE_URL_ENSEMBL = "https://rest.ensembl.org"
@@ -46,53 +51,106 @@ def fetch_json_from_api(url: str, params=None, retries=25, delay=0.1):
     return None
 
 
-# --- NCBI ---
-
-def fetch_ncbi_genomes(tax_id: int, max_records):
-    """
-    Fetch all genome reports for a given tax_id from NCBI Datasets API with pagination.
-    Displays detailed progress with page number, number of records fetched, and total records accumulated.
-    """
+def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6):
     url = f"{BASE_URL_NCBI}/genome/taxon/{tax_id}/dataset_report"
     all_reports = []
-    next_page_token = None
-    page_count = 0
-    total_records = 0
+    token_queue = Queue()
+    lock = threading.Lock()
+    stop_flag = threading.Event()
 
-    print(f"Starting genome fetch for tax_id={tax_id} from NCBI...")
+    print(f"🚀 Starting concurrent genome fetch for tax_id={tax_id} ({max_workers} threads)...")
 
-    while True:
-        params = {}
-        if next_page_token:
-            params["page_token"] = next_page_token
+    # --- Initial request (bootstrap) ---
+    first = fetch_json_from_api(url)
+    if not first:
+        print("❌ Failed initial fetch.")
+        return {"reports": []}
 
-        page_count += 1
-        print(f"\nFetching genome page {page_count}...")
-
-        data = fetch_json_from_api(url, params)
-        if not data:
-            print(f"No data returned for page {page_count}. Stopping pagination.")
-            break
-
-        reports = data.get("reports", [])
-        page_records = len(reports)
-        total_records += page_records
-
-        print(f"Page {page_count} fetched successfully: {page_records} records (total: {total_records})")
-
+    reports = first.get("reports", [])
+    with lock:
         all_reports.extend(reports)
-        if total_records >= max_records:
-            break
-        next_page_token = data.get("next_page_token")
-        if not next_page_token:
-            print(f"\nCompleted fetching all {page_count} pages ({total_records} total genome records).")
-            break
-    if total_records == 0:
-        print("No genome reports found for this tax_id.")
-    else:
-        print(f"Finished: {total_records} total genome records collected across {page_count} pages.")
+    print(f"✅ Page 1 fetched: {len(reports)} records (total: {len(all_reports)})")
 
-    return {"reports": all_reports}
+    next_token = first.get("next_page_token")
+    if not next_token:
+        print("Only one page found.")
+        return {"reports": all_reports}
+
+    token_queue.put(next_token)
+
+    def worker():
+        nonlocal all_reports
+        while not stop_flag.is_set():
+            try:
+                token = token_queue.get(timeout=2)
+            except Empty:
+                # If the queue is empty and stop_flag is set, exit gracefully
+                if stop_flag.is_set():
+                    break
+                continue
+
+            # Stop worker if sentinel is encountered
+            if token is None:
+                token_queue.task_done()
+                break
+
+            # Fetch next page
+            data = fetch_json_from_api(url, params={"page_token": token})
+            if not data:
+                token_queue.task_done()
+                continue
+
+            new_reports = data.get("reports", [])
+            next_token = data.get("next_page_token")
+
+            with lock:
+                all_reports.extend(new_reports)
+                total = len(all_reports)
+                print(f"🧩 {threading.current_thread().name}: +{len(new_reports)} (total={total})")
+                if total >= max_records:
+                    stop_flag.set()
+
+            # Queue the next token if allowed
+            if next_token and not stop_flag.is_set():
+                token_queue.put(next_token)
+
+            token_queue.task_done()
+
+    # Start workers
+    threads = [threading.Thread(target=worker, name=f"Worker-{i}", daemon=True) for i in range(max_workers)]
+    for t in threads:
+        t.start()
+
+    # --- Main thread watcher loop ---
+    while True:
+        time.sleep(0.5)
+        with lock:
+            total = len(all_reports)
+        if total >= max_records:
+            stop_flag.set()
+        # Stop when both conditions hold: queue empty + all workers idle
+        if token_queue.empty() and all(not t.is_alive() or stop_flag.is_set() for t in threads):
+            break
+        # Safety timeout to avoid infinite wait
+        if stop_flag.is_set() and token_queue.empty():
+            break
+
+    # --- Clean shutdown ---
+    while not token_queue.empty():
+        try:
+            token_queue.get_nowait()
+            token_queue.task_done()
+        except Empty:
+            break
+    for _ in threads:
+        token_queue.put(None)
+    for t in threads:
+        t.join(timeout=0.5)
+
+    print(f"✅ Completed: {len(all_reports)} genome records fetched across threads.\n")
+    return {"reports": all_reports[:max_records]}
+
+
 
 
 
