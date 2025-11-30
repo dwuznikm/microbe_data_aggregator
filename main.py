@@ -26,20 +26,34 @@ class GenomeApp(tk.Tk):
         self.taxid_entry = ttk.Entry(self.search_frame, width=30)
         self.taxid_entry.pack()
 
-        # Database checkboxes and max_records field
+        # Database checkboxes
         db_frame = ttk.Frame(self.search_frame)
         db_frame.pack(pady=5)
 
         self.ncbi_var = tk.BooleanVar(value=True)
         self.ensembl_var = tk.BooleanVar(value=True)
+
         ttk.Checkbutton(db_frame, text="NCBI", variable=self.ncbi_var).pack(side="left", padx=5)
         ttk.Checkbutton(db_frame, text="Ensembl", variable=self.ensembl_var).pack(side="left", padx=5)
 
-        tk.Label(db_frame, text="Max records:").pack(side="left", padx=(15, 5))
-        self.max_records_entry = ttk.Entry(db_frame, width=10)
-        self.max_records_entry.insert(0, "100")  # default value
-        self.max_records_entry.pack(side="left")
+        # Max record inputs
+        records_frame = ttk.Frame(self.search_frame)
+        records_frame.pack(pady=5)
 
+        # Max genome
+        tk.Label(records_frame, text="Max genome records:").pack(side="left", padx=5)
+        self.max_genome_records_entry = ttk.Entry(records_frame, width=10)
+        self.max_genome_records_entry.insert(0, "100")
+        self.max_genome_records_entry.pack(side="left", padx=5)
+
+        # Max gene
+        tk.Label(records_frame, text="Max gene records:").pack(side="left", padx=15)
+        self.max_gene_records_entry = ttk.Entry(records_frame, width=10)
+        self.max_gene_records_entry.insert(0, "100")
+        self.max_gene_records_entry.pack(side="left", padx=5)
+
+
+        
 
         # Progress label
         self.progress_label = ttk.Label(self.search_frame, text="")
@@ -178,16 +192,17 @@ class GenomeApp(tk.Tk):
         self.progress_label.config(text=f"Fetching genomes from {', '.join(selected_sources)}...")
         self.update_idletasks()
 
-        # --- Fetch Genome Summary ---
         # --- Get max_records from user input ---
         try:
-            max_records = int(self.max_records_entry.get().strip()) if self.max_records_entry.get().strip() else None
+            max_gene_records = int(self.max_gene_records_entry.get().strip()) if self.max_gene_records_entry.get().strip() else None
+            max_genome_records = int(self.max_genome_records_entry.get().strip()) if self.max_genome_records_entry.get().strip() else None
+
         except ValueError:
             messagebox.showerror("Invalid Input", "Max records must be a number.")
             return
 
         # --- Fetch Genome Summary ---
-        summary = get_genome_summary(taxid, max_records, sources=selected_sources)
+        summary = get_genome_summary(taxid, max_genome_records, sources=selected_sources)
 
         if not summary:
             messagebox.showerror("Error", f"Failed to fetch data for Tax ID {taxid}")
@@ -212,7 +227,7 @@ class GenomeApp(tk.Tk):
         # --- Fetch Gene Data ---
         self.progress_label.config(text="Fetching gene data...")
         self.update_idletasks()
-        genes = get_gene_summary(taxid, max_records)
+        genes = get_gene_summary(taxid, max_gene_records)
 
 
         if not genes:
