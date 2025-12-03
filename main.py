@@ -1,448 +1,364 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 import webbrowser
-from api_client import get_genome_summary, fetch_ncbi_taxonomy, get_gene_summary
 import csv
+import threading
+import time
 
+import api_client  # your existing client
 
 class GenomeApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Genome Data Explorer")
         self.geometry("1100x650")
-        self.create_widgets()
+
+        # session state
+        self.user_email = None
+        self.email_provided = False
+        self.max_ncbi_genome_count = None
+        self.max_ncbi_gene_count = None
         self.genome_data = []
 
+        # build UI
+        self.create_widgets()
+
     def create_widgets(self):
+        # --- Tabs ---
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(expand=True, fill="both")
 
-        # --- Search Tab ---
+        # --- Search tab ---
         self.search_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.search_frame, text="Search")
 
-        # TaxID Entry
-        tk.Label(self.search_frame, text="Enter Taxonomy ID:").pack(pady=5)
+        ttk.Label(self.search_frame, text="Enter Taxonomy ID:").pack(pady=(12, 6))
         self.taxid_entry = ttk.Entry(self.search_frame, width=30)
         self.taxid_entry.pack()
 
-        # Database checkboxes
-        db_frame = ttk.Frame(self.search_frame)
-        db_frame.pack(pady=5)
-
+        sources_frame = ttk.Frame(self.search_frame)
+        sources_frame.pack(pady=10)
         self.ncbi_var = tk.BooleanVar(value=True)
         self.ensembl_var = tk.BooleanVar(value=True)
-
-        ttk.Checkbutton(db_frame, text="NCBI", variable=self.ncbi_var).pack(side="left", padx=5)
-        ttk.Checkbutton(db_frame, text="Ensembl", variable=self.ensembl_var).pack(side="left", padx=5)
-
-        # Max record inputs
-        records_frame = ttk.Frame(self.search_frame)
-        records_frame.pack(pady=5)
-
-        # Max genome
-        tk.Label(records_frame, text="Max genome records:").pack(side="left", padx=5)
-        self.max_genome_records_entry = ttk.Entry(records_frame, width=10)
-        self.max_genome_records_entry.insert(0, "100")
-        self.max_genome_records_entry.pack(side="left", padx=5)
-
-        # Max gene
-        tk.Label(records_frame, text="Max gene records:").pack(side="left", padx=15)
-        self.max_gene_records_entry = ttk.Entry(records_frame, width=10)
-        self.max_gene_records_entry.insert(0, "100")
-        self.max_gene_records_entry.pack(side="left", padx=5)
-
-
-        
-
-        # Progress label
-        self.progress_label = ttk.Label(self.search_frame, text="")
-        self.progress_label.pack(pady=5)
+        ttk.Checkbutton(sources_frame, text="NCBI", variable=self.ncbi_var).pack(side="left", padx=6)
+        ttk.Checkbutton(sources_frame, text="Ensembl", variable=self.ensembl_var).pack(side="left", padx=6)
 
         # Search button
-        search_button = ttk.Button(self.search_frame, text="Search", command=self.search_taxid)
-        search_button.pack(pady=5)
+        self.search_btn = ttk.Button(self.search_frame, text="Search", command=self.on_search_button)
+        self.search_btn.pack(pady=16)
 
-        # --- Taxonomy Tab ---
+        # Frame for max entries + start search button
+        self.max_frame = ttk.Frame(self.search_frame)
+
+        # --- Taxonomy tab ---
         self.taxonomy_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.taxonomy_frame, text="Taxonomy")
-
         self.tax_tree = ttk.Treeview(self.taxonomy_frame)
         self.tax_tree.pack(expand=True, fill="both", padx=10, pady=10)
 
-        # --- Genome Tab ---
+        # --- Genome tab ---
         self.genome_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.genome_frame, text="Genome Info")
+        self._build_genome_table()
+        self._build_genome_filters()
 
+        # --- Gene tab ---
+        self.gene_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.gene_frame, text="Gene Info")
+        self._build_gene_table()
 
-        # --- Filters ---
-        filter_frame = ttk.Frame(self.genome_frame)
-        filter_frame.pack(fill="x", padx=10, pady=5)
-
-        self.ref_var = tk.BooleanVar()
-        ttk.Checkbutton(filter_frame, text="Reference genomes only", variable=self.ref_var).grid(row=0, column=0, padx=5)
-        
-        self.remove_dups_var = tk.BooleanVar()
-        ttk.Checkbutton(filter_frame, text="Remove duplicates", variable=self.remove_dups_var).grid(row=0, column=1, padx=5)
-
-        tk.Label(filter_frame, text="Seq Length min:").grid(row=0, column=2, padx=5)
-        self.seq_min = ttk.Entry(filter_frame, width=10)
-        self.seq_min.grid(row=0, column=3, padx=5)
-
-        tk.Label(filter_frame, text="Seq Length max:").grid(row=0, column=4, padx=5)
-        self.seq_max = ttk.Entry(filter_frame, width=10)
-        self.seq_max.grid(row=0, column=5, padx=5)
-
-        tk.Label(filter_frame, text="Limit rows:").grid(row=0, column=6, padx=5)
-        self.limit_rows = ttk.Entry(filter_frame, width=10)
-        self.limit_rows.grid(row=0, column=7, padx=5)
-        apply_btn = ttk.Button(filter_frame, text="Apply Filters", command=self.apply_filters)
-        apply_btn.grid(row=0, column=8, padx=10)
-        export_btn = ttk.Button(filter_frame, text="Export to CSV", command=self.export_to_csv)
-        export_btn.grid(row=0, column=9, padx=10)
-        
-        # --- Genome Table ---
+    # ---------- UI Table Builders ----------
+    def _build_genome_table(self):
         columns = ("Accession", "Assembly Level", "Seq Length", "GC Content", "# Genes", "Source", "Reference", "Link", "Duplicate")
         self.genome_table = ttk.Treeview(self.genome_frame, columns=columns, show="headings")
-        
         for col in columns:
             self.genome_table.heading(col, text=col, command=lambda c=col: self.sort_treeview_column(self.genome_table, c, False))
             self.genome_table.column(col, width=120, anchor="w")
         self.genome_table.pack(expand=True, fill="both", padx=10, pady=10)
-
-        # Bind double-click to open link
         self.genome_table.bind("<Double-1>", self.open_genome_link)
 
-                # --- Gene Tab ---
-        self.gene_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.gene_frame, text="Gene Info")
+    def _build_genome_filters(self):
+        filter_frame = ttk.Frame(self.genome_frame)
+        filter_frame.pack(fill="x", padx=10, pady=5)
+        self.ref_var = tk.BooleanVar()
+        self.remove_dups_var = tk.BooleanVar()
+        ttk.Checkbutton(filter_frame, text="Reference genomes only", variable=self.ref_var).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(filter_frame, text="Remove duplicates", variable=self.remove_dups_var).grid(row=0, column=1, padx=5)
+        ttk.Label(filter_frame, text="Seq Length min:").grid(row=0, column=2, padx=5)
+        self.seq_min = ttk.Entry(filter_frame, width=10)
+        self.seq_min.grid(row=0, column=3, padx=5)
+        ttk.Label(filter_frame, text="Seq Length max:").grid(row=0, column=4, padx=5)
+        self.seq_max = ttk.Entry(filter_frame, width=10)
+        self.seq_max.grid(row=0, column=5, padx=5)
+        ttk.Label(filter_frame, text="Limit rows:").grid(row=0, column=6, padx=5)
+        self.limit_rows = ttk.Entry(filter_frame, width=10)
+        self.limit_rows.grid(row=0, column=7, padx=5)
+        ttk.Button(filter_frame, text="Apply Filters", command=self.apply_filters).grid(row=0, column=8, padx=10)
+        ttk.Button(filter_frame, text="Export to CSV", command=self.export_to_csv).grid(row=0, column=9, padx=10)
 
-        # --- Gene Table ---
-        gene_columns = ("Gene ID", "Type", "Description", "Symbol", "Locus", "Assemblies", "Link", "Duplicate")
-        self.gene_table = ttk.Treeview(self.gene_frame, columns=gene_columns, show="headings")
-        for col in gene_columns:
+    def _build_gene_table(self):
+        columns = ("Gene ID", "Type", "Description", "Symbol", "Locus", "Assemblies", "Link", "Duplicate")
+        self.gene_table = ttk.Treeview(self.gene_frame, columns=columns, show="headings")
+        for col in columns:
             self.gene_table.heading(col, text=col, command=lambda c=col: self.sort_treeview_column(self.gene_table, c, False))
             self.gene_table.column(col, width=150, anchor="w")
         self.gene_table.pack(expand=True, fill="both", padx=10, pady=10)
-
         self.gene_table.bind("<Double-1>", self.on_gene_double_click)
 
-
-    # ---------------- Genome Link ----------------
-    def open_genome_link(self, event):
-        selected_item = self.genome_table.selection()
-        if not selected_item:
-            return
-        row = self.genome_table.item(selected_item)
-        col = self.genome_table.identify_column(event.x)
-        col_index = int(col.replace("#", "")) - 1
-        values = row["values"]
-
-        # Open Link column
-        if col_index == 7:
-            url = values[col_index]
-            if url:
-                webbrowser.open(url)
-
-    # ---------------- Genome Link ----------------
-    def on_gene_double_click(self, event):
-        selected = self.gene_table.selection()
-        if not selected:
-            return
-        row = self.gene_table.item(selected[0])
-        col = self.gene_table.identify_column(event.x)
-        col_index = int(col.replace("#", "")) - 1
-        values = row["values"]
-
-        if col_index == 6:
-            link = values[col_index]
-            if link:
-                webbrowser.open(link)
-
-
-    # ---------------- Search ----------------
-    def search_taxid(self):
+    # ---------- Initial Search ----------
+    def on_search_button(self):
         taxid_str = self.taxid_entry.get().strip()
         if not taxid_str.isdigit():
-            messagebox.showerror("Invalid Input", "Please enter a valid numeric Tax ID.")
+            messagebox.showerror("Invalid Input", "Please enter a numeric Taxonomy ID.")
             return
-
         taxid = int(taxid_str)
-
-        # Determine which databases to fetch
-        selected_sources = []
-        if self.ncbi_var.get():
-            selected_sources.append("NCBI")
-        if self.ensembl_var.get():
-            selected_sources.append("Ensembl")
-
-        if not selected_sources:
-            messagebox.showerror("No Database Selected", "Select at least one database to search.")
+        sources = []
+        if self.ncbi_var.get(): sources.append("NCBI")
+        if self.ensembl_var.get(): sources.append("Ensembl")
+        if not sources:
+            messagebox.showerror("No Database Selected", "Select at least one database.")
             return
 
-        # Clear previous results
-        self.tax_tree.delete(*self.tax_tree.get_children())
-        for row in self.genome_table.get_children():
-            self.genome_table.delete(row)
-        for row in self.gene_table.get_children():
-            self.gene_table.delete(row)
-        self.genome_data.clear()
+        email = None
+        if "NCBI" in sources and not self.email_provided:
+            email = simpledialog.askstring("NCBI Email", "Enter your email for NCBI Entrez:", parent=self)
+            if not email:
+                return
+            self.user_email = email
+            self.email_provided = True
+        elif "NCBI" in sources:
+            email = self.user_email
 
-        # --- Show progress ---
-        self.progress_label.config(text=f"Fetching genomes from {', '.join(selected_sources)}...")
+        # Fetch genome/gene counts in thread
+        threading.Thread(target=self.fetch_counts_thread, args=(taxid, email, sources), daemon=True).start()
+
+    def fetch_counts_thread(self, taxid, email, sources):
+        genome_count, gene_count = 0, 0
+        try:
+            if "NCBI" in sources:
+                genome_count, gene_count = api_client.get_total_ncbi_genome_count(taxid, email)
+        except Exception as e:
+            messagebox.showerror("Count Failed", f"Could not fetch counts:\n{e}")
+            self.search_btn.config(state="normal")
+            return
+
+        self.max_ncbi_genome_count = genome_count
+        self.max_ncbi_gene_count = gene_count
+        self.show_max_fields(genome_count, gene_count)
+
+    # ---------- Show Max Entries ----------
+    def show_max_fields(self, genome_count, gene_count):
+        for w in self.max_frame.winfo_children(): w.destroy()
+        # Max genome/gene entries
+        ttk.Label(self.max_frame, text="Max genome records:").grid(row=0, column=0, padx=6, pady=6, sticky="e")
+        self.max_genome_entry = ttk.Entry(self.max_frame, width=12)
+        self.max_genome_entry.grid(row=0, column=1, sticky="w")
+        self.max_genome_entry.insert(0, str(genome_count))
+        ttk.Label(self.max_frame, text=f"(max {genome_count})").grid(row=0, column=2, sticky="w")
+
+        ttk.Label(self.max_frame, text="Max gene records:").grid(row=1, column=0, padx=6, pady=6, sticky="e")
+        self.max_gene_entry = ttk.Entry(self.max_frame, width=12)
+        self.max_gene_entry.grid(row=1, column=1, sticky="w")
+        self.max_gene_entry.insert(0, str(gene_count))
+        ttk.Label(self.max_frame, text=f"(max {gene_count})").grid(row=1, column=2, sticky="w")
+
+        # Start search button
+        self.start_search_btn = ttk.Button(self.max_frame, text="Start Search", command=self.on_start_search)
+        self.start_search_btn.grid(row=2, column=0, columnspan=3, pady=10)
+
+        # Progress bar (initially hidden)
+        self.progress_frame = ttk.Frame(self.max_frame)
+        self.progress_label = ttk.Label(self.progress_frame, text="")
+        self.progress_label.pack()
+        self.progress_bar = ttk.Progressbar(self.progress_frame, orient="horizontal", length=400, mode="determinate")
+        self.progress_bar.pack(pady=2)
+        self.progress_percent = ttk.Label(self.progress_frame, text="0%")
+        self.progress_percent.pack()
+        self.progress_frame.grid(row=3, column=0, columnspan=3, pady=10)
+        self.progress_frame.grid_remove()  # hide until start search
+
+        self.max_frame.pack(pady=12)
+
+    # ---------- Start Full Search ----------
+    def on_start_search(self):
+        self.progress_frame.grid()
+        self.progress_bar["value"] = 0
+        self.progress_percent.config(text="0%")
+        self.progress_label.config(text="Starting search...")
         self.update_idletasks()
 
-        # --- Get max_records from user input ---
+        taxid = int(self.taxid_entry.get().strip())
+        max_genomes = int(self.max_genome_entry.get())
+        max_genes = int(self.max_gene_entry.get())
+        sources = []
+        if self.ncbi_var.get(): sources.append("NCBI")
+        if self.ensembl_var.get(): sources.append("Ensembl")
+
+        threading.Thread(target=self.full_search_thread, args=(taxid, max_genomes, max_genes, sources), daemon=True).start()
+
+    # ---------- Full Search Thread ----------
+    def full_search_thread(self, taxid, max_genomes, max_genes, sources):
+        # Start progress bar simulation
+        self.progress_label.config(text="Fetching genome data...")
+        self.progress_bar["value"] = 0
+        self.progress_percent.config(text="0%")
+        self.update_idletasks()
+
+        # Thread to simulate progress
+        def simulate_progress():
+            total_steps = max_genomes // 20
+            for i in range(total_steps):
+                time.sleep(0.7)  # simulate API fetching
+                progress = int((i+1) / total_steps * 90)  # go up to 90% while fetching
+                self.progress_bar["value"] = progress
+                self.progress_percent.config(text=f"{progress}%")
+                self.update_idletasks()
+
+        progress_thread = threading.Thread(target=simulate_progress, daemon=True)
+        progress_thread.start()
+
+        # Fetch genome data
         try:
-            max_gene_records = int(self.max_gene_records_entry.get().strip()) if self.max_gene_records_entry.get().strip() else None
-            max_genome_records = int(self.max_genome_records_entry.get().strip()) if self.max_genome_records_entry.get().strip() else None
-
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Max records must be a number.")
+            summary = api_client.get_genome_summary(taxid, max_genomes, sources=sources)
+            self.genome_data = summary.get("genomes", [])
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch genome summary:\n{e}")
             return
 
-        # --- Fetch Genome Summary ---
-        summary = get_genome_summary(taxid, max_genome_records, sources=selected_sources)
-
-        if not summary:
-            messagebox.showerror("Error", f"Failed to fetch data for Tax ID {taxid}")
-            self.progress_label.config(text="")
-            return
-
-        self.genome_data = summary.get("genomes", [])
+        # Ensure progress reaches 100% for genome fetch
+        self.progress_bar["value"] = 90
+        self.progress_percent.config(text="90%")
+        self.update_idletasks()
 
         # Populate genome table
         self.populate_genome_table(self.genome_data)
 
-        # --- Fetch Taxonomy Tree ---
-        self.progress_label.config(text="Fetching taxonomy data...")
-        self.update_idletasks()
-        tax_data = fetch_ncbi_taxonomy(taxid)
-        if not tax_data:
-            messagebox.showwarning("Warning", "Failed to fetch taxonomy data")
-            self.progress_label.config(text="")
-            return
-        self.build_taxonomy_tree(tax_data)
+        # Taxonomy
+        try:
+            tax_data = api_client.fetch_ncbi_taxonomy(taxid)
+            self.build_taxonomy_tree(tax_data)
+        except Exception:
+            pass
 
-        # --- Fetch Gene Data ---
+        # Genes
         self.progress_label.config(text="Fetching gene data...")
-        self.update_idletasks()
-        genes = get_gene_summary(taxid, max_gene_records)
+        try:
+            genes = api_client.get_gene_summary(taxid, max_genes)
+            self.populate_gene_table(genes)
+        except Exception:
+            pass
 
-
-        if not genes:
-            messagebox.showwarning("Warning", "No gene data found for this Tax ID.")
-            self.progress_label.config(text="")
-            return
-        self.populate_gene_table(genes)
-
+        # Finish progress
+        self.progress_bar["value"] = 100
+        self.progress_percent.config(text="100%")
         self.progress_label.config(text="Done")
 
-
-    # ---------------- Populate Genome Table ----------------
+    # ---------- Populate Tables ----------
     def populate_genome_table(self, genomes):
-        
-        for row in self.genome_table.get_children():
-            self.genome_table.delete(row)
-
+        for r in self.genome_table.get_children(): self.genome_table.delete(r)
         accession_counts = {}
         for g in genomes:
             acc = g.get("Accession")
-            if acc:
-                accession_counts[acc] = accession_counts.get(acc, 0) + 1
-
-        for genome in genomes:
-            acc = genome.get("Accession")
-            duplicate_flag = "Yes" if acc and accession_counts.get(acc, 0) > 1 else "No"
-            genome["Duplicate"] = duplicate_flag
-
+            if acc: accession_counts[acc] = accession_counts.get(acc, 0)+1
+        for g in genomes:
+            g["Duplicate"] = "Yes" if accession_counts.get(g.get("Accession"),0)>1 else "No"
         if self.remove_dups_var.get():
-            seen = set()
-            filtered_genomes = []
-            for g in genomes:
-                acc = g.get("Accession")
-                if acc:
-                    if acc not in seen:
-                        filtered_genomes.append(g)
-                        seen.add(acc)
-                else:
-                    filtered_genomes.append(g)
-            genomes = filtered_genomes
-
-
-        for genome in genomes:
-            values = (
-                genome.get("Accession", ""),
-                genome.get("Assembly Level", ""),
-                genome.get("Seq Length", ""),
-                genome.get("GC Content", ""),
-                genome.get("# Genes", ""),
-                genome.get("Source", ""),
-                genome.get("Reference", ""),
-                genome.get("Link", ""),
-                genome.get("Duplicate", "")
-            )
-            self.genome_table.insert("", "end", values=values)
-
+            seen=set(); genomes=[x for x in genomes if x.get("Accession") not in seen and (seen.add(x.get("Accession")) or True)]
+        for g in genomes:
+            self.genome_table.insert("", "end", values=(
+                g.get("Accession",""), g.get("Assembly Level",""), g.get("Seq Length",""),
+                g.get("GC Content",""), g.get("# Genes",""), g.get("Source",""),
+                g.get("Reference",""), g.get("Link",""), g.get("Duplicate","")
+            ))
         self.adjust_column_widths(self.genome_table)
 
-    # ---------------- Populate Gene Table ----------------
     def populate_gene_table(self, genes):
-        
-        for row in self.gene_table.get_children():
-            self.gene_table.delete(row)
-
+        for r in self.gene_table.get_children(): self.gene_table.delete(r)
         gene_id_counts = {}
         for g in genes:
             gid = g.get("Gene ID")
-            if gid:
-                gene_id_counts[gid] = gene_id_counts.get(gid, 0) + 1
-
-        for gene in genes:
-            gid = gene.get("Gene ID")
-            duplicate_flag = "Yes" if gid and gene_id_counts.get(gid, 0) > 1 else "No"
-            gene["Duplicate"] = duplicate_flag
-
+            if gid: gene_id_counts[gid] = gene_id_counts.get(gid, 0)+1
         for g in genes:
-            values = (
-                g.get("Gene ID", ""),
-                g.get("Type", ""),
-                g.get("Description", ""),
-                g.get("Symbol", ""),
-                g.get("Locus", ""),
-                g.get("Assemblies", ""),
-                g.get("Link", ""),
-                g.get("Duplicate", "")
-            )
-            self.gene_table.insert("", "end", values=values)
-
+            g["Duplicate"] = "Yes" if gene_id_counts.get(g.get("Gene ID"),0)>1 else "No"
+            self.gene_table.insert("", "end", values=(
+                g.get("Gene ID",""), g.get("Type",""), g.get("Description",""), g.get("Symbol",""),
+                g.get("Locus",""), g.get("Assemblies",""), g.get("Link",""), g.get("Duplicate","")
+            ))
         self.adjust_column_widths(self.gene_table)
 
-
-    # ---------------- Apply Filters ----------------
+    # ---------- Filters ----------
     def apply_filters(self):
         filtered = self.genome_data
-
-        # Reference genome filter
-        if self.ref_var.get():
-            filtered = [g for g in filtered if g.get("Reference") == "Yes"]
-
-        # Sequence length min/max
+        if self.ref_var.get(): filtered = [g for g in filtered if g.get("Reference")=="Yes"]
         try:
             seq_min = int(self.seq_min.get()) if self.seq_min.get() else None
             seq_max = int(self.seq_max.get()) if self.seq_max.get() else None
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Sequence length filters must be numeric")
-            return
-
-        if seq_min is not None:
-            filtered = [g for g in filtered if g.get("Seq Length") and int(g.get("Seq Length")) >= seq_min]
-        if seq_max is not None:
-            filtered = [g for g in filtered if g.get("Seq Length") and int(g.get("Seq Length")) <= seq_max]
-
-        # Limit rows
-        try:
-            limit = int(self.limit_rows.get()) if self.limit_rows.get() else None
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Limit must be numeric")
-            return
-
-        if limit is not None:
-            filtered = filtered[:limit]
-
+        except: messagebox.showerror("Invalid Input","Seq filters must be numeric"); return
+        if seq_min: filtered = [g for g in filtered if g.get("Seq Length") and int(g.get("Seq Length"))>=seq_min]
+        if seq_max: filtered = [g for g in filtered if g.get("Seq Length") and int(g.get("Seq Length"))<=seq_max]
+        try: limit=int(self.limit_rows.get()) if self.limit_rows.get() else None
+        except: messagebox.showerror("Invalid Input","Limit must be numeric"); return
+        if limit: filtered=filtered[:limit]
         self.populate_genome_table(filtered)
 
+    # ---------- Utilities ----------
     def sort_treeview_column(self, tree, col, reverse=False):
-        """
-        Sort the Treeview column when header is clicked.
-        tree: ttk.Treeview instance
-        col: column name (string)
-        reverse: bool, sort descending if True
-        """
-        data_list = [(tree.set(k, col), k) for k in tree.get_children('')]
-
-        try:
-            data_list.sort(key=lambda t: float(t[0]) if t[0] else float('-inf'), reverse=reverse)
-        except ValueError:
-            data_list.sort(key=lambda t: t[0], reverse=reverse)
-
-        for index, (val, k) in enumerate(data_list):
-            tree.move(k, '', index)
-
-        tree.heading(col, command=lambda: self.sort_treeview_column(tree, col, not reverse))
+        data = [(tree.set(k,col), k) for k in tree.get_children()]
+        try: data.sort(key=lambda t: float(t[0]) if t[0] else float('-inf'), reverse=reverse)
+        except: data.sort(key=lambda t: t[0], reverse=reverse)
+        for i,(v,k) in enumerate(data): tree.move(k,'',i)
+        tree.heading(col, command=lambda: self.sort_treeview_column(tree,col, not reverse))
 
     def export_to_csv(self):
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv")],
-            title="Save genome table as CSV"
-        )
-        if not file_path:
-            return
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV","*.csv")])
+        if not path: return
+        cols = self.genome_table["columns"]
+        with open(path,"w",newline="",encoding="utf-8") as f:
+            import csv
+            w=csv.writer(f); w.writerow(cols)
+            for r in self.genome_table.get_children(): w.writerow(self.genome_table.item(r)["values"])
+        messagebox.showinfo("Exported", f"Saved to {path}")
 
-        columns = self.genome_table["columns"]
+    def open_genome_link(self, event):
+        sel = self.genome_table.selection()
+        if not sel: return
+        row = self.genome_table.item(sel)
+        col=int(self.genome_table.identify_column(event.x).replace("#",""))-1
+        url = row["values"][col]
+        if url: webbrowser.open(url)
 
-        try:
-            with open(file_path, mode="w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(columns)  # header
-                for row_id in self.genome_table.get_children():
-                    row = self.genome_table.item(row_id)["values"]
-                    writer.writerow(row)
-            messagebox.showinfo("Export Successful", f"Genome table saved to {file_path}")
-        except Exception as e:
-            messagebox.showerror("Export Failed", f"Could not save CSV:\n{e}")
+    def on_gene_double_click(self, event):
+        sel = self.gene_table.selection()
+        if not sel: return
+        row = self.gene_table.item(sel[0])
+        col=int(self.gene_table.identify_column(event.x).replace("#",""))-1
+        url = row["values"][col]
+        if url: webbrowser.open(url)
 
-
-    # ---------------- Adjust Column Widths ----------------
-    @staticmethod
-    def adjust_column_widths(tree):
-        max_widths = []
+    def adjust_column_widths(self, tree):
         for col in tree["columns"]:
-            max_width = max(
-                [len(str(tree.set(item, col))) for item in tree.get_children()] + [len(col)]
-            )
-            pixel_width = min(max_width * 6 + 20, 500)  # cap at 500px
-            max_widths.append(pixel_width)
-        for i, col in enumerate(tree["columns"]):
-            tree.column(col, width=max_widths[i])
+            max_len = max([len(str(tree.set(item,col))) for item in tree.get_children()] + [len(col)])
+            tree.column(col,width=min(max_len*6+20,500))
 
-    # ---------------- Taxonomy Tree ----------------
     def build_taxonomy_tree(self, tax_data):
         try:
             self.tax_tree.delete(*self.tax_tree.get_children())
-            tax = tax_data["reports"][0]["taxonomy"]
-            classification = tax.get("classification", {})
-
-            ranks = ["domain", "kingdom", "phylum", "class", "order", "family", "genus", "species"]
-            indent = 0
-
-            for rank in ranks:
-                node = classification.get(rank)
+            tax=tax_data["reports"][0]["taxonomy"]
+            cls=tax.get("classification",{})
+            indent=0
+            ranks=["domain","kingdom","phylum","class","order","family","genus","species"]
+            for r in ranks:
+                node=cls.get(r)
                 if node:
-                    name = node.get("name", "Unknown")
-                    tid = node.get("id", "")
-                    display_text = " " * (indent * 4) + f"{rank.capitalize()}: {name} (TaxID: {tid})"
-                    item_id = self.tax_tree.insert("", "end", text=display_text)
-                    indent += 1
+                    self.tax_tree.insert("", "end", text=" "*indent*4+f"{r.capitalize()}: {node.get('name')} (TaxID:{node.get('id')})")
+                    indent+=1
+            species_name=cls.get("species",{}).get("name")
+            current_name=tax.get("current_scientific_name",{}).get("name")
+            if species_name and current_name and current_name!=species_name:
+                self.tax_tree.insert("", "end", text=" "*indent*4+f"Strain/variant: {current_name}")
+            for item in self.tax_tree.get_children(): self.tax_tree.item(item, open=True)
+        except: self.tax_tree.insert("", "end", text="Could not parse taxonomy tree")
 
-            species_name = classification.get("species", {}).get("name")
-            current_name = tax.get("current_scientific_name", {}).get("name")
-
-            # Only add strain info if current_name != species_name (since strain is not included in the api update)
-            if species_name and current_name and current_name != species_name:
-                display_text = " " * (indent * 4) + f"Strain/variant: {current_name}"
-                self.tax_tree.insert("", "end", text=display_text)
-
-            # Expand all items
-            for item in self.tax_tree.get_children():
-                self.tax_tree.item(item, open=True)
-
-        except Exception:
-            self.tax_tree.insert("", "end", text="Could not parse taxonomy tree")
-
-
-
-if __name__ == "__main__":
-    app = GenomeApp()
+if __name__=="__main__":
+    app=GenomeApp()
     app.mainloop()

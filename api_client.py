@@ -4,7 +4,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
 import threading
 import time
+from Bio import Entrez
+import ssl
 
+ssl._create_default_https_context = ssl._create_unverified_context
 
 BASE_URL_NCBI = "https://api.ncbi.nlm.nih.gov/datasets/v2"
 BASE_URL_ENSEMBL = "https://rest.ensembl.org"
@@ -197,6 +200,20 @@ def extract_ncbi_genome_metadata(report: dict):
 
 # --- NCBI Gene ---
 
+def get_total_ncbi_genome_count(tax_id: int, email):
+    """
+    Fetch all gene reports for a given tax_id from NCBI Datasets API with pagination.
+    Displays progress with page numbers and total records fetched.
+    """
+    Entrez.email = email
+    handle_genome = Entrez.esearch(db="assembly", term=f"txid{tax_id}[Organism:exp]")
+    record_genome = Entrez.read(handle_genome)
+    handle_gene = Entrez.esearch(db="gene", term=f"txid{tax_id}[Organism:exp]")
+    record_gene = Entrez.read(handle_gene)
+    return record_genome['Count'], record_gene['Count']
+
+
+ 
 def fetch_ncbi_genes(tax_id: int, max_records):
     """
     Fetch all gene reports for a given tax_id from NCBI Datasets API with pagination.
