@@ -356,6 +356,9 @@ def extract_ensembl_genome_metadata(genome: dict):
         return None
 
 
+# --- ENA ---
+
+
 def fetch_ena_genomes(tax_id: int):
     url = f"{BASE_URL_ENA}?result=assembly&query=tax_eq({tax_id})&fields=accession,assembly_level,base_count&format=json"
     return fetch_json_from_api(url)
@@ -425,7 +428,7 @@ def get_genome_summary(tax_id: int, max_records, sources=None):
                 if metadata:
                     summary["genomes"].append(metadata)
 
-    # --- Ensembl genomes ---
+    # --- ENA genomes ---
     if "ENA" in sources:
         ena_data = fetch_ena_genomes(tax_id)
 
