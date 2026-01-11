@@ -54,7 +54,7 @@ def fetch_json_from_api(url: str, params=None, retries=25, delay=0.1):
     return None
 
 
-def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6):
+def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callback=None):
     url = f"{BASE_URL_NCBI}/genome/taxon/{tax_id}/dataset_report"
     all_reports = []
     token_queue = Queue()
@@ -89,17 +89,14 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6):
             try:
                 token = token_queue.get(timeout=2)
             except Empty:
-                # If the queue is empty and stop_flag is set, exit gracefully
                 if stop_flag.is_set():
                     break
                 continue
 
-            # Stop worker if sentinel is encountered
             if token is None:
                 token_queue.task_done()
                 break
 
-            # Fetch next page
             data = fetch_json_from_api(url, params={"page_token": token})
             if not data:
                 token_queue.task_done()
@@ -111,13 +108,11 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6):
             with lock:
                 all_reports.extend(new_reports)
                 total = len(all_reports)
-                print(
-                    f"🧩 {threading.current_thread().name}: +{len(new_reports)} (total={total})"
-                )
+                if progress_callback:
+                    progress_callback(total, max_records)  # <-- faktyczny postęp
                 if total >= max_records:
                     stop_flag.set()
 
-            # Queue the next token if allowed
             if next_token and not stop_flag.is_set():
                 token_queue.put(next_token)
 
@@ -226,7 +221,7 @@ def get_total_ncbi_genome_count(tax_id: int, email):
     return record_genome["Count"], record_gene["Count"]
 
 
-def fetch_ncbi_genes(tax_id: int, max_records):
+def fetch_ncbi_genes(tax_id: int, max_records, progress_callback=None):
     """
     Fetch all gene reports for a given tax_id from NCBI Datasets API with pagination.
     Displays progress with page numbers and total records fetched.
@@ -251,7 +246,8 @@ def fetch_ncbi_genes(tax_id: int, max_records):
 
         reports = data.get("reports", [])
         all_reports.extend(reports)
-
+        if progress_callback:
+            progress_callback(len(all_reports), max_records)
         print(
             f"→ Page {page_count} fetched: {len(reports)} records (total: {len(all_reports)})."
         )
@@ -309,9 +305,9 @@ def extract_ncbi_gene_metadata(report: dict):
         return None
 
 
-def get_gene_summary(tax_id: int, max_records):
+def get_gene_summary(tax_id: int, max_records, progress_callback=None):
     """Fetches and returns all NCBI gene metadata for a given tax_id."""
-    data = fetch_ncbi_genes(tax_id, max_records)
+    data = fetch_ncbi_genes(tax_id, max_records, progress_callback=progress_callback)
     if not data:
         return []
 
@@ -391,7 +387,7 @@ def extract_ena_genome_metadata(genome: dict):
 # --- Combined ---
 
 
-def get_genome_summary(tax_id: int, max_records, sources=None):
+def get_genome_summary(tax_id: int, max_records, sources=None, progress_callback=None):
     """
     Fetches NCBI + Ensembl genome data, returns unified list of genome metadata dicts.
     sources: list of "NCBI" and/or "Ensembl". If None, fetch both.
@@ -411,7 +407,9 @@ def get_genome_summary(tax_id: int, max_records, sources=None):
 
     # --- NCBI genomes ---
     if "NCBI" in sources:
-        ncbi_data = fetch_ncbi_genomes(tax_id, max_records)
+        ncbi_data = fetch_ncbi_genomes(
+            tax_id, max_records, progress_callback=progress_callback
+        )
         if ncbi_data:
             reports = ncbi_data.get("reports", [])
             for r in reports:

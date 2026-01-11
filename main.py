@@ -283,61 +283,58 @@ class GenomeApp(tk.Tk):
             daemon=True,
         ).start()
 
-    # ---------- Full Search Thread ----------
     def full_search_thread(self, taxid, max_genomes, max_genes, sources):
-        # Start progress bar simulation
-        self.progress_label.config(text="Fetching genome data...")
-        self.progress_bar["value"] = 0
-        self.progress_percent.config(text="0%")
-        self.update_idletasks()
+        # --- NCBI genomes ---
+        if "NCBI" in sources:
+            self.progress_label.config(text="Fetching genome data...")
+            self.progress_bar["value"] = 0
+            self.progress_percent.config(text="0%")
+            self.update_idletasks()
 
-        # Thread to simulate progress
-        def simulate_progress():
-            total_steps = max_genomes // 20
-            for i in range(total_steps):
-                time.sleep(0.7)  # simulate API fetching
-                progress = int(
-                    (i + 1) / total_steps * 90
-                )  # go up to 90% while fetching
-                self.progress_bar["value"] = progress
-                self.progress_percent.config(text=f"{progress}%")
+            def genome_progress(current, total):
+                percent = int(current / total * 100)
+                self.progress_bar["value"] = percent
+                self.progress_percent.config(text=f"{percent}%")
                 self.update_idletasks()
 
-        progress_thread = threading.Thread(target=simulate_progress, daemon=True)
-        progress_thread.start()
+            try:
+                summary = api_client.get_genome_summary(
+                    taxid,
+                    max_genomes,
+                    sources=sources,
+                    progress_callback=genome_progress,
+                )
+                self.genome_data = summary.get("genomes", [])
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to fetch genome summary:\n{e}")
+                return
 
-        # Fetch genome data
-        try:
-            summary = api_client.get_genome_summary(taxid, max_genomes, sources=sources)
-            self.genome_data = summary.get("genomes", [])
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to fetch genome summary:\n{e}")
-            return
+            # Populate genome table
+            self.populate_genome_table(self.genome_data)
 
-        # Ensure progress reaches 100% for genome fetch
-        self.progress_bar["value"] = 90
-        self.progress_percent.config(text="90%")
-        self.update_idletasks()
+        # --- Reset progress bar for genes ---
+        if "NCBI" in sources:
+            self.progress_bar["value"] = 0
+            self.progress_percent.config(text="0%")
+            self.progress_label.config(text="Fetching gene data...")
+            self.update_idletasks()
 
-        # Populate genome table
-        self.populate_genome_table(self.genome_data)
+            def gene_progress(current, total):
+                percent = int(current / total * 100)
+                self.progress_bar["value"] = percent
+                self.progress_percent.config(text=f"{percent}%")
+                self.update_idletasks()
 
-        # Taxonomy
-        try:
-            tax_data = api_client.fetch_ncbi_taxonomy(taxid)
-            self.build_taxonomy_tree(tax_data)
-        except Exception:
-            pass
+            try:
+                genes = api_client.get_gene_summary(
+                    taxid, max_genes, progress_callback=gene_progress
+                )
+                self.populate_gene_table(genes)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to fetch gene data:\n{e}")
+                return
 
-        # Genes
-        self.progress_label.config(text="Fetching gene data...")
-        try:
-            genes = api_client.get_gene_summary(taxid, max_genes)
-            self.populate_gene_table(genes)
-        except Exception:
-            pass
-
-        # Finish progress
+        # --- Finish ---
         self.progress_bar["value"] = 100
         self.progress_percent.config(text="100%")
         self.progress_label.config(text="Done")
