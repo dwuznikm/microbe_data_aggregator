@@ -10,18 +10,18 @@ import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
 BASE_URL_NCBI = "https://api.ncbi.nlm.nih.gov/datasets/v2"
+BASE_URL_ENA = "https://www.ebi.ac.uk/ena/portal/api/search"
+
 BASE_URL_ENSEMBL = "https://rest.ensembl.org"
 NCBI_API_KEY = "ad05b3160b82232233a302e84033a1eb8307"
+
 
 def fetch_json_from_api(url: str, params=None, retries=25, delay=0.1):
     """
     Fetch JSON from API with retries and constant delay.
     Supports NCBI API key for increased rate limits (10 req/sec).
     """
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "MicrobeDataAggregator/0.1"
-    }
+    headers = {"Accept": "application/json", "User-Agent": "MicrobeDataAggregator/0.1"}
 
     params = dict(params or {})
     if NCBI_API_KEY:
@@ -34,7 +34,7 @@ def fetch_json_from_api(url: str, params=None, retries=25, delay=0.1):
             return response.json()
 
         except requests.exceptions.HTTPError as e:
-            status = response.status_code if 'response' in locals() else None
+            status = response.status_code if "response" in locals() else None
 
             # Retry for transient server or rate-limit errors
             if status in (429, 500, 502, 503, 504):
@@ -61,7 +61,9 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6):
     lock = threading.Lock()
     stop_flag = threading.Event()
 
-    print(f"🚀 Starting concurrent genome fetch for tax_id={tax_id} ({max_workers} threads)...")
+    print(
+        f"🚀 Starting concurrent genome fetch for tax_id={tax_id} ({max_workers} threads)..."
+    )
 
     # --- Initial request (bootstrap) ---
     first = fetch_json_from_api(url)
@@ -109,7 +111,9 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6):
             with lock:
                 all_reports.extend(new_reports)
                 total = len(all_reports)
-                print(f"🧩 {threading.current_thread().name}: +{len(new_reports)} (total={total})")
+                print(
+                    f"🧩 {threading.current_thread().name}: +{len(new_reports)} (total={total})"
+                )
                 if total >= max_records:
                     stop_flag.set()
 
@@ -120,7 +124,10 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6):
             token_queue.task_done()
 
     # Start workers
-    threads = [threading.Thread(target=worker, name=f"Worker-{i}", daemon=True) for i in range(max_workers)]
+    threads = [
+        threading.Thread(target=worker, name=f"Worker-{i}", daemon=True)
+        for i in range(max_workers)
+    ]
     for t in threads:
         t.start()
 
@@ -132,7 +139,9 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6):
         if total >= max_records:
             stop_flag.set()
         # Stop when both conditions hold: queue empty + all workers idle
-        if token_queue.empty() and all(not t.is_alive() or stop_flag.is_set() for t in threads):
+        if token_queue.empty() and all(
+            not t.is_alive() or stop_flag.is_set() for t in threads
+        ):
             break
         # Safety timeout to avoid infinite wait
         if stop_flag.is_set() and token_queue.empty():
@@ -152,9 +161,6 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6):
 
     print(f"✅ Completed: {len(all_reports)} genome records fetched across threads.\n")
     return {"reports": all_reports[:max_records]}
-
-
-
 
 
 def fetch_ncbi_taxonomy(tax_id: int):
@@ -179,9 +185,15 @@ def extract_ncbi_genome_metadata(report: dict):
         assembly_level = assembly_info.get("assembly_level", "Unknown")
         seq_len = assembly_stats.get("total_sequence_length")
         gc_content = assembly_stats.get("gc_percent")
-        gene_count = annotation_info.get("stats", {}).get("gene_counts", {}).get("total")
+        gene_count = (
+            annotation_info.get("stats", {}).get("gene_counts", {}).get("total")
+        )
 
-        ref_genome = "Yes" if assembly_info.get("refseq_category") == "reference genome" else "No"
+        ref_genome = (
+            "Yes"
+            if assembly_info.get("refseq_category") == "reference genome"
+            else "No"
+        )
         link = f"https://www.ncbi.nlm.nih.gov/assembly/{accession}" if accession else ""
 
         return {
@@ -200,6 +212,7 @@ def extract_ncbi_genome_metadata(report: dict):
 
 # --- NCBI Gene ---
 
+
 def get_total_ncbi_genome_count(tax_id: int, email):
     """
     Fetch all gene reports for a given tax_id from NCBI Datasets API with pagination.
@@ -210,10 +223,9 @@ def get_total_ncbi_genome_count(tax_id: int, email):
     record_genome = Entrez.read(handle_genome)
     handle_gene = Entrez.esearch(db="gene", term=f"txid{tax_id}[Organism:exp]")
     record_gene = Entrez.read(handle_gene)
-    return record_genome['Count'], record_gene['Count']
+    return record_genome["Count"], record_gene["Count"]
 
 
- 
 def fetch_ncbi_genes(tax_id: int, max_records):
     """
     Fetch all gene reports for a given tax_id from NCBI Datasets API with pagination.
@@ -240,15 +252,18 @@ def fetch_ncbi_genes(tax_id: int, max_records):
         reports = data.get("reports", [])
         all_reports.extend(reports)
 
-        print(f"→ Page {page_count} fetched: {len(reports)} records (total: {len(all_reports)}).")
+        print(
+            f"→ Page {page_count} fetched: {len(reports)} records (total: {len(all_reports)})."
+        )
         if len(all_reports) >= max_records:
             break
         next_page_token = data.get("next_page_token")
         if not next_page_token:
-            print(f"Completed fetching {page_count} pages ({len(all_reports)} total gene reports).")
+            print(
+                f"Completed fetching {page_count} pages ({len(all_reports)} total gene reports)."
+            )
             break
     return {"reports": all_reports}
-
 
 
 def extract_ncbi_gene_metadata(report: dict):
@@ -310,6 +325,7 @@ def get_gene_summary(tax_id: int, max_records):
 
 # --- Ensembl ---
 
+
 def fetch_ensembl_genomes(tax_id: int):
     url = f"{BASE_URL_ENSEMBL}/info/genomes/taxonomy/{tax_id}"
     return fetch_json_from_api(url)
@@ -321,7 +337,9 @@ def extract_ensembl_genome_metadata(genome: dict):
         assembly_level = genome.get("assembly_level", "Unknown")
         seq_len = genome.get("base_count")
         link_name = genome.get("url_name") or genome.get("name")
-        link = f"https://bacteria.ensembl.org/{link_name}/Info/Index" if link_name else ""
+        link = (
+            f"https://bacteria.ensembl.org/{link_name}/Info/Index" if link_name else ""
+        )
         ref_genome = "Yes" if genome.get("reference") else "No"
 
         return {
@@ -338,7 +356,37 @@ def extract_ensembl_genome_metadata(genome: dict):
         return None
 
 
+def fetch_ena_genomes(tax_id: int):
+    url = f"{BASE_URL_ENA}?result=assembly&query=tax_eq({tax_id})&fields=accession,assembly_level,base_count&format=json"
+    return fetch_json_from_api(url)
+
+
+def extract_ena_genome_metadata(genome: dict):
+    try:
+        accession = genome.get("accession")
+        assembly_level = genome.get("assembly_level", "Unknown")
+        seq_len = genome.get("base_count")
+
+        link = (
+            f"https://www.ebi.ac.uk/ena/browser/view/{accession}" if accession else ""
+        )
+
+        return {
+            "Accession": accession,
+            "Assembly Level": assembly_level,
+            "Seq Length": seq_len,
+            "GC Content": "",
+            "# Genes": "",
+            "Source": "ENA",
+            "Reference": "No",
+            "Link": link,
+        }
+    except Exception:
+        return None
+
+
 # --- Combined ---
+
 
 def get_genome_summary(tax_id: int, max_records, sources=None):
     """
@@ -346,13 +394,15 @@ def get_genome_summary(tax_id: int, max_records, sources=None):
     sources: list of "NCBI" and/or "Ensembl". If None, fetch both.
     """
     if sources is None:
-        sources = ["NCBI", "Ensembl"]
+        sources = ["NCBI", "Ensembl", "ENA"]
 
     taxonomy_data = fetch_ncbi_taxonomy(tax_id)
     summary = {"tax_id": tax_id, "organism": "Unknown", "genomes": []}
 
     try:
-        summary["organism"] = taxonomy_data["reports"][0]["taxonomy"]["current_scientific_name"]["name"]
+        summary["organism"] = taxonomy_data["reports"][0]["taxonomy"][
+            "current_scientific_name"
+        ]["name"]
     except Exception:
         pass
 
@@ -372,6 +422,16 @@ def get_genome_summary(tax_id: int, max_records, sources=None):
         if ensembl_data and isinstance(ensembl_data, list):
             for g in ensembl_data:
                 metadata = extract_ensembl_genome_metadata(g)
+                if metadata:
+                    summary["genomes"].append(metadata)
+
+    # --- Ensembl genomes ---
+    if "ENA" in sources:
+        ena_data = fetch_ena_genomes(tax_id)
+
+        if ena_data and isinstance(ena_data, list):
+            for g in ena_data:
+                metadata = extract_ena_genome_metadata(g)
                 if metadata:
                     summary["genomes"].append(metadata)
 
