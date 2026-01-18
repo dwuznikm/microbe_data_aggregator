@@ -42,6 +42,7 @@ class GenomeApp(tk.Tk):
         self.ncbi_var = tk.BooleanVar(value=True)
         self.ensembl_var = tk.BooleanVar(value=True)
         self.ena_var = tk.BooleanVar(value=True)
+        self.bvbrc_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(sources_frame, text="NCBI", variable=self.ncbi_var).pack(
             side="left", padx=6
         )
@@ -51,6 +52,10 @@ class GenomeApp(tk.Tk):
         ttk.Checkbutton(sources_frame, text="ENA", variable=self.ena_var).pack(
             side="left", padx=6
         )
+        ttk.Checkbutton(
+            sources_frame, text="BV-BRC", variable=self.bvbrc_var
+        ).pack(side="left", padx=6)
+
 
         # Search button
         self.search_btn = ttk.Button(
@@ -173,6 +178,9 @@ class GenomeApp(tk.Tk):
             sources.append("Ensembl")
         if self.ena_var.get():
             sources.append("ENA")
+        if self.bvbrc_var.get():
+            sources.append("BV-BRC")
+
         if not sources:
             messagebox.showerror(
                 "No Database Selected", "Select at least one database."
@@ -276,6 +284,9 @@ class GenomeApp(tk.Tk):
             sources.append("Ensembl")
         if self.ena_var.get():
             sources.append("ENA")
+        if self.bvbrc_var.get():
+            sources.append("BV-BRC")
+
 
         threading.Thread(
             target=self.full_search_thread,

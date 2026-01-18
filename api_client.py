@@ -11,6 +11,7 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 BASE_URL_NCBI = "https://api.ncbi.nlm.nih.gov/datasets/v2"
 BASE_URL_ENA = "https://www.ebi.ac.uk/ena/portal/api/search"
+BASE_URL_BVBRC = "https://www.bv-brc.org/api"
 
 BASE_URL_ENSEMBL = "https://rest.ensembl.org"
 NCBI_API_KEY = "ad05b3160b82232233a302e84033a1eb8307"
@@ -384,6 +385,46 @@ def extract_ena_genome_metadata(genome: dict):
         return None
 
 
+# --- BV-BRC ---
+
+
+def fetch_bvbrc_genomes(tax_id: int):
+    url = f"{BASE_URL_BVBRC}/genome/"
+    params = {
+        "eq": f"taxon_id,{tax_id}",
+        "http_accept": "application/json",
+    }
+    return fetch_json_from_api(url, params=params)
+
+
+def extract_bvbrc_genome_metadata(genome: dict):
+    try:
+        accession = genome.get("genome_id")
+
+        cds = genome.get("cds", 0)
+        rrna = genome.get("rrna", 0)
+        trna = genome.get("trna", 0)
+        gene_count = cds + rrna + trna
+
+        return {
+            "Accession": accession,
+            "Assembly Level": "",
+            "Seq Length": genome.get("genome_length"),
+            "GC Content": genome.get("gc_content"),
+            "# Genes": gene_count,
+            "Source": "BV-BRC",
+            "Reference": "No",
+            "Link": (
+                f"https://www.bv-brc.org/view/Genome/{accession}"
+                if accession else ""
+            ),
+        }
+    except Exception:
+        return None
+
+
+
+
 # --- Combined ---
 
 
@@ -393,7 +434,8 @@ def get_genome_summary(tax_id: int, max_records, sources=None, progress_callback
     sources: list of "NCBI" and/or "Ensembl". If None, fetch both.
     """
     if sources is None:
-        sources = ["NCBI", "Ensembl", "ENA"]
+        sources = ["NCBI", "Ensembl", "ENA", "BV-BRC"]
+
 
     taxonomy_data = fetch_ncbi_taxonomy(tax_id)
     summary = {"tax_id": tax_id, "organism": "Unknown", "genomes": []}
@@ -435,5 +477,15 @@ def get_genome_summary(tax_id: int, max_records, sources=None, progress_callback
                 metadata = extract_ena_genome_metadata(g)
                 if metadata:
                     summary["genomes"].append(metadata)
+
+    # --- BV-BRC genomes ---
+    if "BV-BRC" in sources:
+        bvbrc_data = fetch_bvbrc_genomes(tax_id)
+        if bvbrc_data and isinstance(bvbrc_data, list):
+            for g in bvbrc_data:
+                meta = extract_bvbrc_genome_metadata(g)
+                if meta:
+                    summary["genomes"].append(meta)
+
 
     return summary
