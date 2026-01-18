@@ -17,7 +17,7 @@ BASE_URL_ENSEMBL = "https://rest.ensembl.org"
 NCBI_API_KEY = "ad05b3160b82232233a302e84033a1eb8307"
 
 
-def fetch_json_from_api(url: str, params=None, retries=25, delay=0.1):
+def fetch_json_from_api(url: str, database=None, params=None, retries=25, delay=0.1):
     """
     Fetch JSON from API with retries and constant delay.
     Supports NCBI API key for increased rate limits (10 req/sec).
@@ -25,7 +25,7 @@ def fetch_json_from_api(url: str, params=None, retries=25, delay=0.1):
     headers = {"Accept": "application/json", "User-Agent": "MicrobeDataAggregator/0.1"}
 
     params = dict(params or {})
-    if NCBI_API_KEY:
+    if NCBI_API_KEY and database == "NCBI":
         params["api_key"] = NCBI_API_KEY
 
     for attempt in range(retries):
@@ -67,7 +67,7 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
     )
 
     # --- Initial request (bootstrap) ---
-    first = fetch_json_from_api(url)
+    first = fetch_json_from_api(url, "NCBI")
     if not first:
         print("❌ Failed initial fetch.")
         return {"reports": []}
@@ -98,7 +98,7 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
                 token_queue.task_done()
                 break
 
-            data = fetch_json_from_api(url, params={"page_token": token})
+            data = fetch_json_from_api(url, "NCBI", params={"page_token": token})
             if not data:
                 token_queue.task_done()
                 continue
@@ -164,7 +164,7 @@ def fetch_ncbi_taxonomy(tax_id: int):
     Fetch taxonomy report for a given tax_id.
     """
     url = f"{BASE_URL_NCBI}/taxonomy/taxon/{tax_id}/dataset_report"
-    return fetch_json_from_api(url)
+    return fetch_json_from_api(url, "NCBI")
 
 
 def extract_ncbi_genome_metadata(report: dict):
@@ -240,7 +240,7 @@ def fetch_ncbi_genes(tax_id: int, max_records, progress_callback=None):
         page_count += 1
         print(f"Fetching gene page {page_count}...")
 
-        data = fetch_json_from_api(url, params)
+        data = fetch_json_from_api(url, "NCBI", params)
         if not data:
             print("No data returned or request failed.")
             break
@@ -389,17 +389,13 @@ def extract_ena_genome_metadata(genome: dict):
 
 
 def fetch_bvbrc_genomes(tax_id: int):
-    url = f"{BASE_URL_BVBRC}/genome/"
-    params = {
-        "eq": f"taxon_id,{tax_id}",
-        "http_accept": "application/json",
-    }
-    return fetch_json_from_api(url, params=params)
+    url = f"{BASE_URL_BVBRC}/genome/?eq(taxon_id,{tax_id})&http_accept=application/json"
+    return fetch_json_from_api(url)
 
 
 def extract_bvbrc_genome_metadata(genome: dict):
     try:
-        accession = genome.get("genome_id")
+        accession = genome.get("assembly_accession")
 
         cds = genome.get("cds", 0)
         rrna = genome.get("rrna", 0)
@@ -415,14 +411,11 @@ def extract_bvbrc_genome_metadata(genome: dict):
             "Source": "BV-BRC",
             "Reference": "No",
             "Link": (
-                f"https://www.bv-brc.org/view/Genome/{accession}"
-                if accession else ""
+                f"https://www.bv-brc.org/view/Genome/{accession}" if accession else ""
             ),
         }
     except Exception:
         return None
-
-
 
 
 # --- Combined ---
@@ -435,7 +428,6 @@ def get_genome_summary(tax_id: int, max_records, sources=None, progress_callback
     """
     if sources is None:
         sources = ["NCBI", "Ensembl", "ENA", "BV-BRC"]
-
 
     taxonomy_data = fetch_ncbi_taxonomy(tax_id)
     summary = {"tax_id": tax_id, "organism": "Unknown", "genomes": []}
@@ -486,6 +478,5 @@ def get_genome_summary(tax_id: int, max_records, sources=None, progress_callback
                 meta = extract_bvbrc_genome_metadata(g)
                 if meta:
                     summary["genomes"].append(meta)
-
 
     return summary
