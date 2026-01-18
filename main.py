@@ -217,7 +217,7 @@ class GenomeApp(tk.Tk):
         for w in self.max_frame.winfo_children():
             w.destroy()
         # Max genome/gene entries
-        ttk.Label(self.max_frame, text="Max genome records:").grid(
+        ttk.Label(self.max_frame, text="Max genomic records:").grid(
             row=0, column=0, padx=6, pady=6, sticky="e"
         )
         self.max_genome_entry = ttk.Entry(self.max_frame, width=12)
@@ -227,7 +227,7 @@ class GenomeApp(tk.Tk):
             row=0, column=2, sticky="w"
         )
 
-        ttk.Label(self.max_frame, text="Max gene records:").grid(
+        ttk.Label(self.max_frame, text="Max genetic records:").grid(
             row=1, column=0, padx=6, pady=6, sticky="e"
         )
         self.max_gene_entry = ttk.Entry(self.max_frame, width=12)
@@ -286,7 +286,7 @@ class GenomeApp(tk.Tk):
     def full_search_thread(self, taxid, max_genomes, max_genes, sources):
         # --- NCBI genomes ---
         if "NCBI" in sources:
-            self.progress_label.config(text="Fetching genome data...")
+            self.progress_label.config(text="Fetching genomic data...")
             self.progress_bar["value"] = 0
             self.progress_percent.config(text="0%")
             self.update_idletasks()
@@ -306,7 +306,7 @@ class GenomeApp(tk.Tk):
                 )
                 self.genome_data = summary.get("genomes", [])
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to fetch genome summary:\n{e}")
+                messagebox.showerror("Error", f"Failed to fetch genomic summary:\n{e}")
                 return
 
             # Populate genome table
@@ -316,7 +316,7 @@ class GenomeApp(tk.Tk):
         if "NCBI" in sources:
             self.progress_bar["value"] = 0
             self.progress_percent.config(text="0%")
-            self.progress_label.config(text="Fetching gene data...")
+            self.progress_label.config(text="Fetching genetic data...")
             self.update_idletasks()
 
             def gene_progress(current, total):
@@ -331,7 +331,7 @@ class GenomeApp(tk.Tk):
                 )
                 self.populate_gene_table(genes)
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to fetch gene data:\n{e}")
+                messagebox.showerror("Error", f"Failed to fetch genetic data:\n{e}")
                 return
 
         # --- Finish ---
