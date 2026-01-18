@@ -63,19 +63,18 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
     stop_flag = threading.Event()
 
     print(
-        f"🚀 Starting concurrent genome fetch for tax_id={tax_id} ({max_workers} threads)..."
+        f"Starting concurrent genome fetch for tax_id={tax_id} ({max_workers} threads)..."
     )
 
     # --- Initial request (bootstrap) ---
     first = fetch_json_from_api(url, "NCBI")
     if not first:
-        print("❌ Failed initial fetch.")
+        print("Failed initial fetch.")
         return {"reports": []}
 
     reports = first.get("reports", [])
     with lock:
         all_reports.extend(reports)
-    print(f"✅ Page 1 fetched: {len(reports)} records (total: {len(all_reports)})")
 
     next_token = first.get("next_page_token")
     if not next_token:
@@ -155,7 +154,7 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
     for t in threads:
         t.join(timeout=0.5)
 
-    print(f"✅ Completed: {len(all_reports)} genome records fetched across threads.\n")
+    print(f"Completed: {len(all_reports)} genome records fetched across threads.\n")
     return {"reports": all_reports[:max_records]}
 
 
@@ -174,6 +173,11 @@ def extract_ncbi_genome_metadata(report: dict):
     try:
         accession = report.get("accession")
         source_database = report.get("source_database")
+        source_database = (
+            "REFSEQ"
+            if report.get("source_database") == "SOURCE_DATABASE_REFSEQ"
+            else "GENBANK"
+        )
         assembly_info = report.get("assembly_info", {})
         assembly_stats = report.get("assembly_stats", {})
         annotation_info = report.get("annotation_info", {})

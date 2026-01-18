@@ -52,10 +52,9 @@ class GenomeApp(tk.Tk):
         ttk.Checkbutton(sources_frame, text="ENA", variable=self.ena_var).pack(
             side="left", padx=6
         )
-        ttk.Checkbutton(
-            sources_frame, text="BV-BRC", variable=self.bvbrc_var
-        ).pack(side="left", padx=6)
-
+        ttk.Checkbutton(sources_frame, text="BV-BRC", variable=self.bvbrc_var).pack(
+            side="left", padx=6
+        )
 
         # Search button
         self.search_btn = ttk.Button(
@@ -65,6 +64,19 @@ class GenomeApp(tk.Tk):
 
         # Frame for max entries + start search button
         self.max_frame = ttk.Frame(self.search_frame)
+
+        # --- Universal progress frame ---
+        self.progress_frame = ttk.Frame(self.search_frame)
+        self.progress_label = ttk.Label(self.progress_frame, text="")
+        self.progress_label.pack()
+        self.progress_bar = ttk.Progressbar(
+            self.progress_frame, orient="horizontal", length=400, mode="determinate"
+        )
+        self.progress_percent = ttk.Label(self.progress_frame, text="0%")
+        self.progress_bar.pack(pady=2)
+        self.progress_percent.pack(pady=2)
+        self.progress_frame.pack(pady=10)
+        self.progress_frame.pack_forget()  # hide initially
 
         # --- Taxonomy tab ---
         self.taxonomy_frame = ttk.Frame(self.notebook)
@@ -171,6 +183,8 @@ class GenomeApp(tk.Tk):
             messagebox.showerror("Invalid Input", "Please enter a numeric Taxonomy ID.")
             return
         taxid = int(taxid_str)
+
+        # Build sources list
         sources = []
         if self.ncbi_var.get():
             sources.append("NCBI")
@@ -187,6 +201,7 @@ class GenomeApp(tk.Tk):
             )
             return
 
+        # NCBI email handling
         email = None
         if "NCBI" in sources and not self.email_provided:
             email = simpledialog.askstring(
@@ -199,10 +214,23 @@ class GenomeApp(tk.Tk):
         elif "NCBI" in sources:
             email = self.user_email
 
-        # Fetch genome/gene counts in thread
-        threading.Thread(
-            target=self.fetch_counts_thread, args=(taxid, email, sources), daemon=True
-        ).start()
+        # --- New workflow logic ---
+        if "NCBI" in sources:
+            # If NCBI selected, fetch max counts first
+            threading.Thread(
+                target=self.fetch_counts_thread,
+                args=(taxid, email, sources),
+                daemon=True,
+            ).start()
+        else:
+            # No NCBI → start search immediately
+            max_genomes = None
+            max_genes = None
+            threading.Thread(
+                target=self.full_search_thread,
+                args=(taxid, max_genomes, max_genes, sources),
+                daemon=True,
+            ).start()
 
     def fetch_counts_thread(self, taxid, email, sources):
         genome_count, gene_count = 0, 0
@@ -220,7 +248,6 @@ class GenomeApp(tk.Tk):
         self.max_ncbi_gene_count = gene_count
         self.show_max_fields(genome_count, gene_count)
 
-    # ---------- Show Max Entries ----------
     def show_max_fields(self, genome_count, gene_count):
         for w in self.max_frame.winfo_children():
             w.destroy()
@@ -251,24 +278,11 @@ class GenomeApp(tk.Tk):
         )
         self.start_search_btn.grid(row=2, column=0, columnspan=3, pady=10)
 
-        # Progress bar (initially hidden)
-        self.progress_frame = ttk.Frame(self.max_frame)
-        self.progress_label = ttk.Label(self.progress_frame, text="")
-        self.progress_label.pack()
-        self.progress_bar = ttk.Progressbar(
-            self.progress_frame, orient="horizontal", length=400, mode="determinate"
-        )
-        self.progress_bar.pack(pady=2)
-        self.progress_percent = ttk.Label(self.progress_frame, text="0%")
-        self.progress_percent.pack()
-        self.progress_frame.grid(row=3, column=0, columnspan=3, pady=10)
-        self.progress_frame.grid_remove()  # hide until start search
-
         self.max_frame.pack(pady=12)
 
     # ---------- Start Full Search ----------
     def on_start_search(self):
-        self.progress_frame.grid()
+        self.progress_frame.pack()
         self.progress_bar["value"] = 0
         self.progress_percent.config(text="0%")
         self.progress_label.config(text="Starting search...")
@@ -287,7 +301,6 @@ class GenomeApp(tk.Tk):
         if self.bvbrc_var.get():
             sources.append("BV-BRC")
 
-
         threading.Thread(
             target=self.full_search_thread,
             args=(taxid, max_genomes, max_genes, sources),
@@ -295,60 +308,95 @@ class GenomeApp(tk.Tk):
         ).start()
 
     def full_search_thread(self, taxid, max_genomes, max_genes, sources):
-        # --- NCBI genomes ---
-        if "NCBI" in sources:
-            self.progress_label.config(text="Fetching genomic data...")
-            self.progress_bar["value"] = 0
-            self.progress_percent.config(text="0%")
-            self.update_idletasks()
+        def update_progress_label(text):
+            if hasattr(self, "progress_label"):
+                self.after(0, lambda: self.progress_label.config(text=text))
 
-            def genome_progress(current, total):
-                percent = int(current / total * 100)
-                self.progress_bar["value"] = percent
-                self.progress_percent.config(text=f"{percent}%")
-                self.update_idletasks()
+        def update_progress_bar(percent):
+            if hasattr(self, "progress_bar") and hasattr(self, "progress_percent"):
+                self.after(0, lambda: self.progress_bar.config(value=percent))
+                self.after(0, lambda: self.progress_percent.config(text=f"{percent}%"))
+
+        # Show progress frame
+        if hasattr(self, "progress_frame"):
+            self.after(0, lambda: self.progress_frame.pack())
+
+        # --- Fetch taxonomy ---
+        update_progress_label("Fetching taxonomy data...")
+        try:
+            tax_data = api_client.fetch_ncbi_taxonomy(taxid)
+            self.build_taxonomy_tree(tax_data)
+        except Exception:
+            pass
+
+        # --- Genomes ---
+        for source in sources:
+            update_progress_label(f"Fetching {source} genomic data...")
+            genome_progress = None
+
+            if source == "NCBI":
+                if hasattr(self, "progress_bar"):
+                    self.after(0, lambda: self.progress_bar.pack(pady=2))
+                if hasattr(self, "progress_percent"):
+                    self.after(0, lambda: self.progress_percent.pack(pady=2))
+                update_progress_bar(0)
+
+                def genome_progress(current, total):
+                    percent = int(current / total * 100)
+                    update_progress_bar(percent)
+
+            else:
+                if hasattr(self, "progress_bar"):
+                    self.after(0, lambda: self.progress_bar.pack_forget())
+                if hasattr(self, "progress_percent"):
+                    self.after(0, lambda: self.progress_percent.pack_forget())
 
             try:
                 summary = api_client.get_genome_summary(
                     taxid,
-                    max_genomes,
-                    sources=sources,
+                    max_genomes or 0,
+                    sources=[source],
                     progress_callback=genome_progress,
                 )
-                self.genome_data = summary.get("genomes", [])
+                genomes = summary.get("genomes", [])
+                self.genome_data.extend(genomes)
+                self.after(
+                    0, lambda g=genomes: self.populate_genome_table(self.genome_data)
+                )
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to fetch genomic summary:\n{e}")
-                return
+                self.after(
+                    0,
+                    lambda e=e: messagebox.showerror(
+                        "Error", f"Failed to fetch genomic data from {source}:\n{e}"
+                    ),
+                )
 
-            # Populate genome table
-            self.populate_genome_table(self.genome_data)
-
-        # --- Reset progress bar for genes ---
+        # --- Genes (NCBI only) ---
         if "NCBI" in sources:
-            self.progress_bar["value"] = 0
-            self.progress_percent.config(text="0%")
-            self.progress_label.config(text="Fetching genetic data...")
-            self.update_idletasks()
+            update_progress_label("Fetching NCBI genetic data...")
 
             def gene_progress(current, total):
                 percent = int(current / total * 100)
-                self.progress_bar["value"] = percent
-                self.progress_percent.config(text=f"{percent}%")
-                self.update_idletasks()
+                update_progress_bar(percent)
+
+            update_progress_bar(0)
 
             try:
                 genes = api_client.get_gene_summary(
                     taxid, max_genes, progress_callback=gene_progress
                 )
-                self.populate_gene_table(genes)
+                self.after(0, lambda: self.populate_gene_table(genes))
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to fetch genetic data:\n{e}")
-                return
+                self.after(
+                    0,
+                    lambda e=e: messagebox.showerror(
+                        "Error", f"Failed to fetch genetic data:\n{e}"
+                    ),
+                )
 
-        # --- Finish ---
-        self.progress_bar["value"] = 100
-        self.progress_percent.config(text="100%")
-        self.progress_label.config(text="Done")
+            update_progress_bar(100)
+
+        update_progress_label("Done")
 
     # ---------- Populate Tables ----------
     def populate_genome_table(self, genomes):
