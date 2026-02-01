@@ -1,11 +1,9 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import webbrowser
-import csv
 import threading
-import time
 
-import api_client  # your existing client
+import api_client
 
 
 class GenomeApp(tk.Tk):
@@ -14,14 +12,14 @@ class GenomeApp(tk.Tk):
         self.title("Genome Data Explorer")
         self.geometry("1100x650")
 
-        # session state
+        # --- session state ---
         self.user_email = None
         self.email_provided = False
         self.max_ncbi_genome_count = None
         self.max_ncbi_gene_count = None
         self.genome_data = []
 
-        # build UI
+        # --- build UI ---
         self.create_widgets()
 
     def create_widgets(self):
@@ -62,10 +60,7 @@ class GenomeApp(tk.Tk):
         )
         self.search_btn.pack(pady=16)
 
-        # Frame for max entries + start search button
-        self.max_frame = ttk.Frame(self.search_frame)
-
-        # --- Universal progress frame ---
+        # --- Progress frame ---
         self.progress_frame = ttk.Frame(self.search_frame)
         self.progress_label = ttk.Label(self.progress_frame, text="")
         self.progress_label.pack()
@@ -77,6 +72,11 @@ class GenomeApp(tk.Tk):
         self.progress_percent.pack(pady=2)
         self.progress_frame.pack(pady=10)
         self.progress_frame.pack_forget()  # hide initially
+        self.progress_text_only = ttk.Label(
+            self.search_frame, text="", foreground="blue"
+        )
+        self.progress_text_only.pack(pady=5)
+        self.progress_text_only.pack_forget()  # hide initially
 
         # --- Taxonomy tab ---
         self.taxonomy_frame = ttk.Frame(self.notebook)
@@ -184,7 +184,6 @@ class GenomeApp(tk.Tk):
             return
         taxid = int(taxid_str)
 
-        # Build sources list
         sources = []
         if self.ncbi_var.get():
             sources.append("NCBI")
@@ -194,14 +193,12 @@ class GenomeApp(tk.Tk):
             sources.append("ENA")
         if self.bvbrc_var.get():
             sources.append("BV-BRC")
-
         if not sources:
             messagebox.showerror(
                 "No Database Selected", "Select at least one database."
             )
             return
 
-        # NCBI email handling
         email = None
         if "NCBI" in sources and not self.email_provided:
             email = simpledialog.askstring(
@@ -214,92 +211,85 @@ class GenomeApp(tk.Tk):
         elif "NCBI" in sources:
             email = self.user_email
 
-        # --- New workflow logic ---
+        # --- Use proper popup ---
         if "NCBI" in sources:
-            # If NCBI selected, fetch max counts first
             threading.Thread(
                 target=self.fetch_counts_thread,
                 args=(taxid, email, sources),
                 daemon=True,
             ).start()
         else:
-            # No NCBI → start search immediately
-            max_genomes = None
-            max_genes = None
+            # Show text-only progress
+            self.progress_text_only.config(text="Starting search...")
+            self.progress_text_only.pack()
+            self.update_idletasks()
+
             threading.Thread(
                 target=self.full_search_thread,
-                args=(taxid, max_genomes, max_genes, sources),
+                args=(taxid, None, None, sources, False),
                 daemon=True,
             ).start()
 
+    # ---------- NCBI Max Count Popup ----------
     def fetch_counts_thread(self, taxid, email, sources):
-        genome_count, gene_count = 0, 0
         try:
-            if "NCBI" in sources:
-                genome_count, gene_count = api_client.get_total_ncbi_genome_count(
-                    taxid, email
-                )
+            genome_count, gene_count = api_client.get_total_ncbi_genome_count(
+                taxid, email
+            )
+            self.max_ncbi_genome_count = genome_count
+            self.max_ncbi_gene_count = gene_count
+            self.after(
+                0, lambda: self.show_max_popup(genome_count, gene_count, taxid, sources)
+            )
         except Exception as e:
-            messagebox.showerror("Count Failed", f"Could not fetch counts:\n{e}")
-            self.search_btn.config(state="normal")
-            return
+            self.after(
+                0,
+                lambda: messagebox.showerror(
+                    "Count Failed", f"Could not fetch counts:\n{e}"
+                ),
+            )
 
-        self.max_ncbi_genome_count = genome_count
-        self.max_ncbi_gene_count = gene_count
-        self.show_max_fields(genome_count, gene_count)
+    def show_max_popup(self, genome_count, gene_count, taxid, sources):
+        popup = tk.Toplevel(self)
+        popup.title("NCBI Max Records")
+        popup.grab_set()
 
-    def show_max_fields(self, genome_count, gene_count):
-        for w in self.max_frame.winfo_children():
-            w.destroy()
-        # Max genome/gene entries
-        ttk.Label(self.max_frame, text="Max genomic records:").grid(
+        ttk.Label(popup, text="Max genomic records:").grid(
             row=0, column=0, padx=6, pady=6, sticky="e"
         )
-        self.max_genome_entry = ttk.Entry(self.max_frame, width=12)
-        self.max_genome_entry.grid(row=0, column=1, sticky="w")
-        self.max_genome_entry.insert(0, str(genome_count))
-        ttk.Label(self.max_frame, text=f"(max {genome_count})").grid(
-            row=0, column=2, sticky="w"
-        )
+        max_genome_entry = ttk.Entry(popup, width=12)
+        max_genome_entry.grid(row=0, column=1, sticky="w")
+        max_genome_entry.insert(0, str(genome_count))
+        ttk.Label(popup, text=f"Max: {genome_count}").grid(row=0, column=2, sticky="w")
 
-        ttk.Label(self.max_frame, text="Max genetic records:").grid(
+        ttk.Label(popup, text="Max genetic records:").grid(
             row=1, column=0, padx=6, pady=6, sticky="e"
         )
-        self.max_gene_entry = ttk.Entry(self.max_frame, width=12)
-        self.max_gene_entry.grid(row=1, column=1, sticky="w")
-        self.max_gene_entry.insert(0, str(gene_count))
-        ttk.Label(self.max_frame, text=f"(max {gene_count})").grid(
-            row=1, column=2, sticky="w"
+        max_gene_entry = ttk.Entry(popup, width=12)
+        max_gene_entry.grid(row=1, column=1, sticky="w")
+        max_gene_entry.insert(0, str(gene_count))
+        ttk.Label(popup, text=f"Max: {gene_count}").grid(row=1, column=2, sticky="w")
+
+        def start_search():
+            try:
+                max_genomes_val = int(max_genome_entry.get())
+                max_genes_val = int(max_gene_entry.get())
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Max records must be numeric")
+                return
+            popup.destroy()
+            self.on_start_search(taxid, sources, max_genomes_val, max_genes_val)
+
+        ttk.Button(popup, text="Start Search", command=start_search).grid(
+            row=2, column=0, columnspan=3, pady=10
         )
 
-        # Start search button
-        self.start_search_btn = ttk.Button(
-            self.max_frame, text="Start Search", command=self.on_start_search
-        )
-        self.start_search_btn.grid(row=2, column=0, columnspan=3, pady=10)
-
-        self.max_frame.pack(pady=12)
-
-    # ---------- Start Full Search ----------
-    def on_start_search(self):
+    def on_start_search(self, taxid, sources, max_genomes=None, max_genes=None):
         self.progress_frame.pack()
         self.progress_bar["value"] = 0
         self.progress_percent.config(text="0%")
         self.progress_label.config(text="Starting search...")
         self.update_idletasks()
-
-        taxid = int(self.taxid_entry.get().strip())
-        max_genomes = int(self.max_genome_entry.get())
-        max_genes = int(self.max_gene_entry.get())
-        sources = []
-        if self.ncbi_var.get():
-            sources.append("NCBI")
-        if self.ensembl_var.get():
-            sources.append("Ensembl")
-        if self.ena_var.get():
-            sources.append("ENA")
-        if self.bvbrc_var.get():
-            sources.append("BV-BRC")
 
         threading.Thread(
             target=self.full_search_thread,
@@ -307,21 +297,22 @@ class GenomeApp(tk.Tk):
             daemon=True,
         ).start()
 
-    def full_search_thread(self, taxid, max_genomes, max_genes, sources):
+    def full_search_thread(self, taxid, max_genomes, max_genes, sources, show_bar=True):
+        # Reset data at start of search
+        self.genome_data = []
+
         def update_progress_label(text):
-            if hasattr(self, "progress_label"):
+            if show_bar:
                 self.after(0, lambda: self.progress_label.config(text=text))
+            else:
+                self.after(0, lambda: self.progress_text_only.config(text=text))
 
         def update_progress_bar(percent):
-            if hasattr(self, "progress_bar") and hasattr(self, "progress_percent"):
+            if show_bar:
                 self.after(0, lambda: self.progress_bar.config(value=percent))
                 self.after(0, lambda: self.progress_percent.config(text=f"{percent}%"))
 
-        # Show progress frame
-        if hasattr(self, "progress_frame"):
-            self.after(0, lambda: self.progress_frame.pack())
-
-        # --- Fetch taxonomy ---
+        # --- Taxonomy ---
         update_progress_label("Fetching taxonomy data...")
         try:
             tax_data = api_client.fetch_ncbi_taxonomy(taxid)
@@ -332,24 +323,10 @@ class GenomeApp(tk.Tk):
         # --- Genomes ---
         for source in sources:
             update_progress_label(f"Fetching {source} genomic data...")
-            genome_progress = None
 
-            if source == "NCBI":
-                if hasattr(self, "progress_bar"):
-                    self.after(0, lambda: self.progress_bar.pack(pady=2))
-                if hasattr(self, "progress_percent"):
-                    self.after(0, lambda: self.progress_percent.pack(pady=2))
-                update_progress_bar(0)
-
-                def genome_progress(current, total):
-                    percent = int(current / total * 100)
-                    update_progress_bar(percent)
-
-            else:
-                if hasattr(self, "progress_bar"):
-                    self.after(0, lambda: self.progress_bar.pack_forget())
-                if hasattr(self, "progress_percent"):
-                    self.after(0, lambda: self.progress_percent.pack_forget())
+            def genome_progress(current, total):
+                pct = int(current / total * 100) if total else 0
+                update_progress_bar(pct)
 
             try:
                 summary = api_client.get_genome_summary(
@@ -376,14 +353,12 @@ class GenomeApp(tk.Tk):
             update_progress_label("Fetching NCBI genetic data...")
 
             def gene_progress(current, total):
-                percent = int(current / total * 100)
-                update_progress_bar(percent)
-
-            update_progress_bar(0)
+                pct = int(current / total * 100) if total else 0
+                update_progress_bar(pct)
 
             try:
                 genes = api_client.get_gene_summary(
-                    taxid, max_genes, progress_callback=gene_progress
+                    taxid, max_genes or 0, progress_callback=gene_progress
                 )
                 self.after(0, lambda: self.populate_gene_table(genes))
             except Exception as e:
@@ -397,6 +372,10 @@ class GenomeApp(tk.Tk):
             update_progress_bar(100)
 
         update_progress_label("Done")
+        if show_bar:
+            self.after(2000, self.progress_frame.pack_forget)
+        else:
+            self.after(2000, self.progress_text_only.pack_forget)
 
     # ---------- Populate Tables ----------
     def populate_genome_table(self, genomes):
@@ -532,7 +511,7 @@ class GenomeApp(tk.Tk):
         sel = self.genome_table.selection()
         if not sel:
             return
-        row = self.genome_table.item(sel)
+        row = self.genome_table.item(sel[0])
         col = int(self.genome_table.identify_column(event.x).replace("#", "")) - 1
         url = row["values"][col]
         if url:
