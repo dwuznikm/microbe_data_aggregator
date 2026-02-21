@@ -2,6 +2,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import webbrowser
 import threading
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from collections import Counter
 
 import api_client
 
@@ -21,6 +24,18 @@ class GenomeApp(tk.Tk):
 
         # --- build UI ---
         self.create_widgets()
+
+    def _build_summary_tab(self):
+        self.summary_stats_frame = ttk.Frame(self.summary_frame)
+        self.summary_stats_frame.pack(fill="x", padx=10, pady=10)
+
+        self.summary_label = ttk.Label(
+            self.summary_stats_frame, text="", justify="left"
+        )
+        self.summary_label.pack(anchor="w")
+
+        self.summary_charts_frame = ttk.Frame(self.summary_frame)
+        self.summary_charts_frame.pack(expand=True, fill="both", padx=10, pady=10)
 
     def create_widgets(self):
         # --- Tabs ---
@@ -94,6 +109,11 @@ class GenomeApp(tk.Tk):
         self.gene_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.gene_frame, text="Gene Info")
         self._build_gene_table()
+
+        # --- Summary tab ---
+        self.summary_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.summary_frame, text="Summary")
+        self._build_summary_tab()
 
     # ---------- UI Table Builders ----------
     def _build_genome_table(self):
@@ -377,6 +397,8 @@ class GenomeApp(tk.Tk):
         else:
             self.after(2000, self.progress_text_only.pack_forget)
 
+        self.after(0, self.update_summary)
+
     # ---------- Populate Tables ----------
     def populate_genome_table(self, genomes):
         for r in self.genome_table.get_children():
@@ -443,6 +465,72 @@ class GenomeApp(tk.Tk):
                 ),
             )
         self.adjust_column_widths(self.gene_table)
+
+    def update_summary(self):
+        if not self.genome_data:
+            return
+
+        # --- Basic stats ---
+        total = len(self.genome_data)
+        accessions = [
+            g.get("Accession") for g in self.genome_data if g.get("Accession")
+        ]
+        unique_accessions = len(set(accessions))
+        duplicates = total - unique_accessions
+
+        source_counts = Counter(g.get("Source") for g in self.genome_data)
+        assembly_counts = Counter(
+            g.get("Assembly Level") or "Unknown" for g in self.genome_data
+        )
+
+        stats_text = (
+            f"Total genome records: {total}\n"
+            f"Unique accessions: {unique_accessions}\n"
+            f"Duplicate records (cross-database overlap): {duplicates}\n\n"
+            f"Records per database:\n"
+        )
+
+        for source, count in source_counts.items():
+            stats_text += f"  - {source}: {count}\n"
+
+        self.summary_label.config(text=stats_text)
+
+        # --- Clear previous charts ---
+        for widget in self.summary_charts_frame.winfo_children():
+            widget.destroy()
+
+        # --- Create figure ---
+        fig = plt.Figure(figsize=(12, 8))
+
+        # Source distribution
+        ax1 = fig.add_subplot(221)
+        ax1.bar(source_counts.keys(), source_counts.values())
+        ax1.set_title("Records per Database")
+        ax1.tick_params(axis="x", rotation=45)
+
+        # Assembly level distribution
+        ax2 = fig.add_subplot(222)
+        ax2.bar(assembly_counts.keys(), assembly_counts.values())
+        ax2.set_title("Assembly Level Distribution")
+        ax2.tick_params(axis="x", rotation=45)
+
+        # Sequence length histogram
+        seq_lengths = [
+            int(g.get("Seq Length")) for g in self.genome_data if g.get("Seq Length")
+        ]
+
+        if seq_lengths:
+            ax3 = fig.add_subplot(212)
+            ax3.hist(seq_lengths, bins=20)
+            ax3.set_title("Sequence Length Distribution")
+            ax3.set_xlabel("Sequence Length")
+            ax3.set_ylabel("Count")
+
+        fig.tight_layout(pad=3.0)
+
+        canvas = FigureCanvasTkAgg(fig, master=self.summary_charts_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(expand=True, fill="both")
 
     # ---------- Filters ----------
     def apply_filters(self):
