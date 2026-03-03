@@ -4,7 +4,8 @@ import webbrowser
 import threading
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from collections import Counter
+from collections import Counter, defaultdict
+import numpy as np
 
 import api_client
 
@@ -466,22 +467,36 @@ class GenomeApp(tk.Tk):
             )
         self.adjust_column_widths(self.gene_table)
 
+    def normalize_assembly(self, level):
+        if not level:
+            return "Unknown"
+
+        level = level.strip().lower().replace("_", " ")
+
+        mapping = {
+            "complete genome": "Complete Genome",
+            "chromosome": "Chromosome",
+            "scaffold": "Scaffold",
+            "contig": "Contig",
+            "primary assembly": "Primary Assembly",
+        }
+
+        return mapping.get(level, level.title())
+
     def update_summary(self):
         if not self.genome_data:
             return
 
-        # --- Basic stats ---
+        # Basic stats
         total = len(self.genome_data)
+
         accessions = [
             g.get("Accession") for g in self.genome_data if g.get("Accession")
         ]
         unique_accessions = len(set(accessions))
         duplicates = total - unique_accessions
 
-        source_counts = Counter(g.get("Source") for g in self.genome_data)
-        assembly_counts = Counter(
-            g.get("Assembly Level") or "Unknown" for g in self.genome_data
-        )
+        source_counts = Counter(g.get("Source") or "Unknown" for g in self.genome_data)
 
         stats_text = (
             f"Total genome records: {total}\n"
@@ -495,36 +510,99 @@ class GenomeApp(tk.Tk):
 
         self.summary_label.config(text=stats_text)
 
-        # --- Clear previous charts ---
+        # Clear previous charts
         for widget in self.summary_charts_frame.winfo_children():
             widget.destroy()
 
-        # --- Create figure ---
         fig = plt.Figure(figsize=(12, 8))
 
-        # Source distribution
+        # Color scheme
+        colors = {
+            "NCBI": "#d62728",
+            "ENA": "#1f77b4",
+            "Ensembl": "#2ca02c",
+            "BV-BRC": "#9467bd",
+            "Unknown": "gray",
+        }
+
+        sources = sorted(source_counts.keys())
+
+        # Records per Database
         ax1 = fig.add_subplot(221)
-        ax1.bar(source_counts.keys(), source_counts.values())
+        ax1.bar(
+            source_counts.keys(),
+            source_counts.values(),
+            color=[colors.get(s, "gray") for s in source_counts.keys()],
+        )
         ax1.set_title("Records per Database")
         ax1.tick_params(axis="x", rotation=45)
 
-        # Assembly level distribution
+        # Assembly Level
+
+        assembly_db_counts = defaultdict(lambda: defaultdict(int))
+
+        for g in self.genome_data:
+            assembly = self.normalize_assembly(g.get("Assembly Level"))
+            source = g.get("Source") or "Unknown"
+            assembly_db_counts[assembly][source] += 1
+
+        assemblies = sorted(assembly_db_counts.keys())
+
         ax2 = fig.add_subplot(222)
-        ax2.bar(assembly_counts.keys(), assembly_counts.values())
-        ax2.set_title("Assembly Level Distribution")
-        ax2.tick_params(axis="x", rotation=45)
 
-        # Sequence length histogram
-        seq_lengths = [
-            int(g.get("Seq Length")) for g in self.genome_data if g.get("Seq Length")
-        ]
+        bottom = np.zeros(len(assemblies))
 
-        if seq_lengths:
+        for source in sources:
+            values = [
+                assembly_db_counts[assembly].get(source, 0) for assembly in assemblies
+            ]
+
+            ax2.bar(
+                assemblies,
+                values,
+                bottom=bottom,
+                label=source,
+                color=colors.get(source, "gray"),
+            )
+
+            bottom += np.array(values)
+
+        ax2.set_title("Assembly Level Distribution (by Database)")
+        ax2.tick_params(axis="x", rotation=30)
+        ax2.legend()
+
+        # Sequence Length
+        seq_data = []
+
+        for g in self.genome_data:
+            try:
+                length = int(g.get("Seq Length"))
+                source = g.get("Source") or "Unknown"
+                seq_data.append((length, source))
+            except:
+                continue
+
+        if seq_data:
             ax3 = fig.add_subplot(212)
-            ax3.hist(seq_lengths, bins=20)
-            ax3.set_title("Sequence Length Distribution")
-            ax3.set_xlabel("Sequence Length")
+
+            all_lengths = [x[0] for x in seq_data]
+            bins = np.histogram_bin_edges(all_lengths, bins="auto")
+
+            for source in sources:
+                source_lengths = [length for length, s in seq_data if s == source]
+
+                ax3.hist(
+                    source_lengths,
+                    bins=bins,
+                    stacked=True,
+                    label=source,
+                    color=colors.get(source, "gray"),
+                )
+
+            ax3.set_title("Sequence Length Distribution (by Database)")
+            ax3.set_xlabel("Sequence Length (bp)")
             ax3.set_ylabel("Count")
+            ax3.legend()
 
         fig.tight_layout(pad=3.0)
 
