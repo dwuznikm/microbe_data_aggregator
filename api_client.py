@@ -17,11 +17,13 @@ BASE_URL_ENSEMBL = "https://rest.ensembl.org"
 NCBI_API_KEY = "ad05b3160b82232233a302e84033a1eb8307"
 
 
-def fetch_json_from_api(url: str, database=None, params=None, retries=25, delay=0.1):
+def fetch_json_from_api(url: str, database=None, params=None, retries=None, delay=0.1):
     """
     Fetch JSON from API with retries and constant delay.
     Supports NCBI API key for increased rate limits (10 req/sec).
     """
+    if retries is None:
+        retries = 25 if database == "NCBI" else 2
     headers = {"Accept": "application/json", "User-Agent": "MicrobeDataAggregator/0.1"}
 
     params = dict(params or {})
@@ -30,7 +32,7 @@ def fetch_json_from_api(url: str, database=None, params=None, retries=25, delay=
 
     for attempt in range(retries):
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=60)
+            response = requests.get(url, headers=headers, params=params, timeout=30)
             response.raise_for_status()
             return response.json()
 
@@ -443,44 +445,42 @@ def get_genome_summary(tax_id: int, max_records, sources=None, progress_callback
     except Exception:
         pass
 
-    # --- NCBI genomes ---
-    if "NCBI" in sources:
-        ncbi_data = fetch_ncbi_genomes(
-            tax_id, max_records, progress_callback=progress_callback
-        )
-        if ncbi_data:
-            reports = ncbi_data.get("reports", [])
-            for r in reports:
-                metadata = extract_ncbi_genome_metadata(r)
-                if metadata:
-                    summary["genomes"].append(metadata)
+    # Fetch all sources concurrently
+    fetch_funcs = {
+        "NCBI": lambda: fetch_ncbi_genomes(tax_id, max_records, progress_callback=progress_callback),
+        "Ensembl": lambda: fetch_ensembl_genomes(tax_id),
+        "ENA": lambda: fetch_ena_genomes(tax_id),
+        "BV-BRC": lambda: fetch_bvbrc_genomes(tax_id),
+    }
 
-    # --- Ensembl genomes ---
-    if "Ensembl" in sources:
-        ensembl_data = fetch_ensembl_genomes(tax_id)
-        if ensembl_data and isinstance(ensembl_data, list):
-            for g in ensembl_data:
-                metadata = extract_ensembl_genome_metadata(g)
-                if metadata:
-                    summary["genomes"].append(metadata)
+    with ThreadPoolExecutor(max_workers=len(sources)) as executor:
+        futures = {source: executor.submit(fetch_funcs[source]) for source in sources if source in fetch_funcs}
+        results = {source: future.result() for source, future in futures.items()}
 
-    # --- ENA genomes ---
-    if "ENA" in sources:
-        ena_data = fetch_ena_genomes(tax_id)
+    # Process results
+    if "NCBI" in results and results["NCBI"]:
+        reports = results["NCBI"].get("reports", [])
+        for r in reports:
+            metadata = extract_ncbi_genome_metadata(r)
+            if metadata:
+                summary["genomes"].append(metadata)
 
-        if ena_data and isinstance(ena_data, list):
-            for g in ena_data:
-                metadata = extract_ena_genome_metadata(g)
-                if metadata:
-                    summary["genomes"].append(metadata)
+    if "Ensembl" in results and results["Ensembl"] and isinstance(results["Ensembl"], list):
+        for g in results["Ensembl"]:
+            metadata = extract_ensembl_genome_metadata(g)
+            if metadata:
+                summary["genomes"].append(metadata)
 
-    # --- BV-BRC genomes ---
-    if "BV-BRC" in sources:
-        bvbrc_data = fetch_bvbrc_genomes(tax_id)
-        if bvbrc_data and isinstance(bvbrc_data, list):
-            for g in bvbrc_data:
-                meta = extract_bvbrc_genome_metadata(g)
-                if meta:
-                    summary["genomes"].append(meta)
+    if "ENA" in results and results["ENA"] and isinstance(results["ENA"], list):
+        for g in results["ENA"]:
+            metadata = extract_ena_genome_metadata(g)
+            if metadata:
+                summary["genomes"].append(metadata)
+
+    if "BV-BRC" in results and results["BV-BRC"] and isinstance(results["BV-BRC"], list):
+        for g in results["BV-BRC"]:
+            meta = extract_bvbrc_genome_metadata(g)
+            if meta:
+                summary["genomes"].append(meta)
 
     return summary

@@ -1,3 +1,8 @@
+import logging
+import base64
+import os
+from io import BytesIO
+
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import webbrowser
@@ -6,8 +11,12 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from collections import Counter, defaultdict
 import numpy as np
+from datetime import datetime
 
 import api_client
+import reports
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
 class GenomeApp(tk.Tk):
@@ -23,6 +32,9 @@ class GenomeApp(tk.Tk):
         self.max_ncbi_gene_count = None
         self.genome_data = []
 
+        # --- runtime state ---
+        self._search_running = False
+
         # --- build UI ---
         self.create_widgets()
 
@@ -34,6 +46,13 @@ class GenomeApp(tk.Tk):
             self.summary_stats_frame, text="", justify="left"
         )
         self.summary_label.pack(anchor="w")
+
+        self.export_html_btn = ttk.Button(
+            self.summary_stats_frame,
+            text="Export HTML report",
+            command=self.export_html_report,
+        )
+        self.export_html_btn.pack(anchor="e", pady=(6, 0))
 
         self.summary_charts_frame = ttk.Frame(self.summary_frame)
         self.summary_charts_frame.pack(expand=True, fill="both", padx=10, pady=10)
@@ -75,6 +94,14 @@ class GenomeApp(tk.Tk):
             self.search_frame, text="Search", command=self.on_search_button
         )
         self.search_btn.pack(pady=16)
+
+        # Auto export mode (faster run, no interactive tables)
+        self.auto_export_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            self.search_frame,
+            text="Auto-export (CSV + HTML) only",
+            variable=self.auto_export_var,
+        ).pack(pady=(0, 16))
 
         # --- Progress frame ---
         self.progress_frame = ttk.Frame(self.search_frame)
@@ -205,20 +232,24 @@ class GenomeApp(tk.Tk):
             return
         taxid = int(taxid_str)
 
+        auto_export = self.auto_export_var.get()
+        export_dir = None
+        if auto_export:
+            export_dir = filedialog.askdirectory(
+                title="Select folder to save CSV + HTML exports"
+            )
+            if not export_dir:
+                return
+
         sources = []
-        if self.ncbi_var.get():
-            sources.append("NCBI")
         if self.ensembl_var.get():
             sources.append("Ensembl")
         if self.ena_var.get():
             sources.append("ENA")
         if self.bvbrc_var.get():
             sources.append("BV-BRC")
-        if not sources:
-            messagebox.showerror(
-                "No Database Selected", "Select at least one database."
-            )
-            return
+        if self.ncbi_var.get():
+            sources.append("NCBI")
 
         email = None
         if "NCBI" in sources and not self.email_provided:
@@ -233,26 +264,27 @@ class GenomeApp(tk.Tk):
             email = self.user_email
 
         # --- Use proper popup ---
+        show_bar = not auto_export and "NCBI" in sources
+
+        self.progress_text_only.config(text="Starting...")
+        self.progress_text_only.pack()
+        self.update_idletasks()
+
         if "NCBI" in sources:
             threading.Thread(
                 target=self.fetch_counts_thread,
-                args=(taxid, email, sources),
+                args=(taxid, email, sources, export_dir, show_bar),
                 daemon=True,
             ).start()
         else:
-            # Show text-only progress
-            self.progress_text_only.config(text="Starting search...")
-            self.progress_text_only.pack()
-            self.update_idletasks()
-
             threading.Thread(
                 target=self.full_search_thread,
-                args=(taxid, None, None, sources, False),
+                args=(taxid, None, None, sources, show_bar, export_dir),
                 daemon=True,
             ).start()
 
     # ---------- NCBI Max Count Popup ----------
-    def fetch_counts_thread(self, taxid, email, sources):
+    def fetch_counts_thread(self, taxid, email, sources, export_dir=None, show_bar=True):
         try:
             genome_count, gene_count = api_client.get_total_ncbi_genome_count(
                 taxid, email
@@ -260,7 +292,10 @@ class GenomeApp(tk.Tk):
             self.max_ncbi_genome_count = genome_count
             self.max_ncbi_gene_count = gene_count
             self.after(
-                0, lambda: self.show_max_popup(genome_count, gene_count, taxid, sources)
+                0,
+                lambda: self.show_max_popup(
+                    genome_count, gene_count, taxid, sources, export_dir, show_bar
+                ),
             )
         except Exception as e:
             self.after(
@@ -270,7 +305,9 @@ class GenomeApp(tk.Tk):
                 ),
             )
 
-    def show_max_popup(self, genome_count, gene_count, taxid, sources):
+    def show_max_popup(
+        self, genome_count, gene_count, taxid, sources, export_dir=None, show_bar=True
+    ):
         popup = tk.Toplevel(self)
         popup.title("NCBI Max Records")
         popup.grab_set()
@@ -299,34 +336,61 @@ class GenomeApp(tk.Tk):
                 messagebox.showerror("Invalid Input", "Max records must be numeric")
                 return
             popup.destroy()
-            self.on_start_search(taxid, sources, max_genomes_val, max_genes_val)
+            self.on_start_search(
+                taxid, sources, max_genomes_val, max_genes_val, export_dir, show_bar
+            )
 
         ttk.Button(popup, text="Start Search", command=start_search).grid(
             row=2, column=0, columnspan=3, pady=10
         )
 
-    def on_start_search(self, taxid, sources, max_genomes=None, max_genes=None):
-        self.progress_frame.pack()
-        self.progress_bar["value"] = 0
-        self.progress_percent.config(text="0%")
-        self.progress_label.config(text="Starting search...")
+    def on_start_search(
+        self,
+        taxid,
+        sources,
+        max_genomes=None,
+        max_genes=None,
+        export_dir=None,
+        show_bar=True,
+    ):
+        show_bar = show_bar and "NCBI" in sources
+        self.set_search_running(True)
+        if show_bar:
+            self.progress_bar["value"] = 0
+            self.progress_percent.config(text="0%")
+            self.progress_label.config(text="Starting search...")
+        else:
+            self.progress_text_only.config(text="Starting search...")
+            self.progress_text_only.pack()
         self.update_idletasks()
 
         threading.Thread(
             target=self.full_search_thread,
-            args=(taxid, max_genomes, max_genes, sources),
+            args=(taxid, max_genomes, max_genes, sources, show_bar, export_dir),
             daemon=True,
         ).start()
 
-    def full_search_thread(self, taxid, max_genomes, max_genes, sources, show_bar=True):
+    def set_search_running(self, running: bool):
+        """Enable/disable UI controls during a search."""
+        self._search_running = running
+        state = "disabled" if running else "normal"
+        self.search_btn.config(state=state)
+        self.taxid_entry.config(state=state)
+
+    def full_search_thread(
+        self,
+        taxid,
+        max_genomes,
+        max_genes,
+        sources,
+        show_bar=True,
+        export_dir=None,
+    ):
         # Reset data at start of search
         self.genome_data = []
 
         def update_progress_label(text):
-            if show_bar:
-                self.after(0, lambda: self.progress_label.config(text=text))
-            else:
-                self.after(0, lambda: self.progress_text_only.config(text=text))
+            self.after(0, lambda: self.progress_text_only.config(text=text))
 
         def update_progress_bar(percent):
             if show_bar:
@@ -339,50 +403,60 @@ class GenomeApp(tk.Tk):
             tax_data = api_client.fetch_ncbi_taxonomy(taxid)
             self.build_taxonomy_tree(tax_data)
         except Exception:
-            pass
+            logging.exception("Failed to fetch taxonomy")
 
         # --- Genomes ---
-        for source in sources:
-            update_progress_label(f"Fetching {source} genomic data...")
+        update_progress_label("Fetching genomic data from multiple sources...")
 
-            def genome_progress(current, total):
-                pct = int(current / total * 100) if total else 0
-                update_progress_bar(pct)
+        if "NCBI" in sources:
+            self.after(0, lambda: self.progress_text_only.pack_forget())
+            self.after(0, lambda: self.progress_frame.pack())
+            self.after(0, lambda: self.progress_label.config(text="Fetching genomic data from multiple sources..."))
 
-            try:
-                summary = api_client.get_genome_summary(
-                    taxid,
-                    max_genomes or 0,
-                    sources=[source],
-                    progress_callback=genome_progress,
-                )
-                genomes = summary.get("genomes", [])
-                self.genome_data.extend(genomes)
+        def genome_progress(current, total):
+            pct = min(100, int(current / total * 100)) if total else 0
+            update_progress_bar(pct)
+
+        try:
+            summary = api_client.get_genome_summary(
+                taxid,
+                max_genomes or 0,
+                sources=sources,
+                progress_callback=genome_progress,
+            )
+            genomes = summary.get("genomes", [])
+            self.genome_data.extend(genomes)
+            if not export_dir:
                 self.after(
-                    0, lambda g=genomes: self.populate_genome_table(self.genome_data)
+                    0, lambda g=genomes: self.append_genomes(g)
                 )
-            except Exception as e:
-                self.after(
-                    0,
-                    lambda e=e: messagebox.showerror(
-                        "Error", f"Failed to fetch genomic data from {source}:\n{e}"
-                    ),
-                )
+        except Exception as e:
+            logging.exception("Failed to fetch genomic data")
+            self.after(
+                0,
+                lambda e=e: messagebox.showerror(
+                    "Error", f"Failed to fetch genomic data:\n{e}"
+                ),
+            )
 
         # --- Genes (NCBI only) ---
         if "NCBI" in sources:
             update_progress_label("Fetching NCBI genetic data...")
+            self.after(0, lambda: self.progress_label.config(text="Fetching NCBI genetic data..."))
 
             def gene_progress(current, total):
-                pct = int(current / total * 100) if total else 0
+                pct = min(100, int(current / total * 100)) if total else 0
                 update_progress_bar(pct)
 
             try:
                 genes = api_client.get_gene_summary(
                     taxid, max_genes or 0, progress_callback=gene_progress
                 )
-                self.after(0, lambda: self.populate_gene_table(genes))
+                # store genes even in export mode (optional in future)
+                if not export_dir:
+                    self.after(0, lambda: self.populate_gene_table(genes))
             except Exception as e:
+                logging.exception("Failed to fetch genetic data")
                 self.after(
                     0,
                     lambda e=e: messagebox.showerror(
@@ -398,7 +472,28 @@ class GenomeApp(tk.Tk):
         else:
             self.after(2000, self.progress_text_only.pack_forget)
 
-        self.after(0, self.update_summary)
+        if export_dir:
+            try:
+                csv_path, html_path = reports._export_results(export_dir, taxid, self.genome_data)
+                self.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "Exported",
+                        f"Saved CSV and HTML to:\n{csv_path}\n{html_path}",
+                    ),
+                )
+            except Exception as e:
+                logging.exception("Failed to export results")
+                self.after(
+                    0,
+                    lambda e=e: messagebox.showerror(
+                        "Error", f"Could not export results:\n{e}"
+                    ),
+                )
+        else:
+            self.after(0, self.update_summary)
+
+        self.after(0, lambda: self.set_search_running(False))
 
     # ---------- Populate Tables ----------
     def populate_genome_table(self, genomes):
@@ -438,6 +533,11 @@ class GenomeApp(tk.Tk):
                 ),
             )
         self.adjust_column_widths(self.genome_table)
+
+    def append_genomes(self, genomes):
+        """Add newly fetched genomes and refresh the table."""
+        self.genome_data.extend(genomes)
+        self.populate_genome_table(self.genome_data)
 
     def populate_gene_table(self, genes):
         for r in self.gene_table.get_children():
@@ -480,8 +580,6 @@ class GenomeApp(tk.Tk):
             "contig": "Contig",
             "primary assembly": "Primary Assembly",
         }
-
-        return mapping.get(level, level.title())
 
     def update_summary(self):
         if not self.genome_data:
@@ -542,7 +640,7 @@ class GenomeApp(tk.Tk):
         assembly_db_counts = defaultdict(lambda: defaultdict(int))
 
         for g in self.genome_data:
-            assembly = self.normalize_assembly(g.get("Assembly Level"))
+            assembly = reports.normalize_assembly(g.get("Assembly Level"))
             source = g.get("Source") or "Unknown"
             assembly_db_counts[assembly][source] += 1
 
@@ -663,15 +761,26 @@ class GenomeApp(tk.Tk):
         )
         if not path:
             return
-        cols = self.genome_table["columns"]
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            import csv
-
-            w = csv.writer(f)
-            w.writerow(cols)
-            for r in self.genome_table.get_children():
-                w.writerow(self.genome_table.item(r)["values"])
+        reports._write_genome_csv(path, self.genome_data)
         messagebox.showinfo("Exported", f"Saved to {path}")
+
+    def export_html_report(self):
+        if not self.genome_data:
+            messagebox.showinfo("No data", "No genome data to export.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".html", filetypes=[("HTML", "*.html")]
+        )
+        if not path:
+            return
+
+        try:
+            reports._write_html_report(path, self.genome_data, open_after=True)
+            messagebox.showinfo("Exported", f"Saved report to {path}")
+        except Exception as e:
+            logging.exception("Failed to export HTML report")
+            messagebox.showerror("Error", f"Could not export HTML report:\n{e}")
 
     def open_genome_link(self, event):
         sel = self.genome_table.selection()
