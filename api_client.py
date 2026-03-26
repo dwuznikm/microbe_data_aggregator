@@ -2,6 +2,7 @@ import requests
 import time
 import os
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
 import threading
@@ -84,6 +85,80 @@ def fetch_json_from_api(url: str, database=None, params=None, retries=None, dela
 
     print(f"Giving up after {retries} attempts for URL: {url}")
     return None
+
+
+def fetch_json_and_headers_from_api(
+    url: str, database=None, params=None, retries=None, delay=0.1
+):
+    """Fetch JSON payload with response headers."""
+    if retries is None:
+        retries = 25 if database == "NCBI" else 2
+    headers = {"Accept": "application/json", "User-Agent": "MicrobeDataAggregator/0.1"}
+
+    params = dict(params or {})
+    if NCBI_API_KEY and database == "NCBI":
+        params["api_key"] = NCBI_API_KEY
+
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            return response.json(), dict(response.headers)
+
+        except requests.exceptions.HTTPError as e:
+            status = response.status_code if "response" in locals() else None
+
+            if status in (429, 500, 502, 503, 504):
+                print(f"Server error {status}, retrying ({attempt+1}/{retries})...")
+                time.sleep(delay)
+                continue
+
+            print(f"Non-retryable HTTP error {status}: {e}")
+            break
+
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            time.sleep(delay)
+            continue
+
+    print(f"Giving up after {retries} attempts for URL: {url}")
+    return None, {}
+
+
+def _parse_content_range_total(content_range):
+    """Parse BV-BRC Content-Range like 'items 0-24/1234' and return total as int."""
+    if not content_range:
+        return None
+    try:
+        total_part = str(content_range).split("/")[-1].strip()
+        if total_part == "*":
+            return None
+        return int(total_part)
+    except Exception:
+        return None
+
+
+def get_total_bvbrc_genome_count(tax_id: int):
+    """Get total BV-BRC genome records for a taxon using Content-Range headers."""
+    url = (
+        f"{BASE_URL_BVBRC}/genome/?eq(taxon_id,{tax_id})"
+        f"&limit(1,0)&http_accept=application/json"
+    )
+    data, headers = fetch_json_and_headers_from_api(url)
+    if data is None:
+        raise RuntimeError("Could not fetch BV-BRC genome count")
+
+    total = _parse_content_range_total(
+        headers.get("Content-Range") or headers.get("content-range")
+    )
+
+    if total is not None:
+        return total
+
+    if isinstance(data, list):
+        return len(data)
+
+    return 0
 
 
 def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callback=None):
@@ -578,9 +653,65 @@ def fetch_bvbrc_genomes(tax_id: int, max_records=0, page_size=250):
     all_records = []
     end_status = "completed"
     end_details = None
+    total_available = None
+    planned_records = None
+    planned_pages = None
 
     try:
-        while True:
+        first_url = (
+            f"{BASE_URL_BVBRC}/genome/?eq(taxon_id,{tax_id})"
+            f"&limit({page_size},0)&http_accept=application/json"
+        )
+        first_page, first_headers = fetch_json_and_headers_from_api(first_url)
+
+        if first_page is None:
+            end_status = "no_data"
+            _log_fetch_timing(
+                "genome_fetch_bvbrc",
+                tax_id,
+                start_time,
+                status=end_status,
+                records=0,
+                details="initial request failed",
+            )
+            return []
+
+        if not isinstance(first_page, list):
+            end_status = "unexpected_response"
+            end_details = f"type={type(first_page).__name__}"
+            _log_fetch_timing(
+                "genome_fetch_bvbrc",
+                tax_id,
+                start_time,
+                status=end_status,
+                records=0,
+                details=end_details,
+            )
+            return []
+
+        total_available = _parse_content_range_total(
+            first_headers.get("Content-Range") or first_headers.get("content-range")
+        )
+
+        if total_available is not None:
+            planned_records = min(limit, total_available) if limit > 0 else total_available
+            planned_pages = max(1, math.ceil(planned_records / page_size)) if planned_records > 0 else 0
+            print(
+                f"BV-BRC total available: {total_available}. "
+                f"Planned fetch: {planned_records} records across ~{planned_pages} pages."
+            )
+
+        pages = 1
+        all_records.extend(first_page)
+
+        if limit > 0 and len(all_records) >= limit:
+            all_records = all_records[:limit]
+            end_status = "max_reached"
+            end_details = "reached limit on first page"
+        else:
+            start = page_size
+
+        while end_status == "completed":
             url = (
                 f"{BASE_URL_BVBRC}/genome/?eq(taxon_id,{tax_id})"
                 f"&limit({page_size},{start})&http_accept=application/json"
@@ -588,8 +719,6 @@ def fetch_bvbrc_genomes(tax_id: int, max_records=0, page_size=250):
             page_data = fetch_json_from_api(url)
 
             if not page_data:
-                if pages == 0:
-                    end_status = "no_data"
                 break
 
             if not isinstance(page_data, list):
@@ -610,6 +739,19 @@ def fetch_bvbrc_genomes(tax_id: int, max_records=0, page_size=250):
                 break
 
             start += page_size
+
+            if planned_pages is not None and pages >= planned_pages:
+                break
+
+        detail_parts = []
+        if total_available is not None:
+            detail_parts.append(f"total_available={total_available}")
+        if planned_pages is not None:
+            detail_parts.append(f"planned_pages={planned_pages}")
+        detail_parts.append(f"fetched_pages={pages}")
+        if end_details:
+            detail_parts.append(end_details)
+        end_details = "; ".join(detail_parts)
 
         _log_fetch_timing(
             "genome_fetch_bvbrc",
@@ -659,7 +801,13 @@ def extract_bvbrc_genome_metadata(genome: dict):
 # --- Combined ---
 
 
-def get_genome_summary(tax_id: int, max_records, sources=None, progress_callback=None):
+def get_genome_summary(
+    tax_id: int,
+    max_records,
+    max_bvbrc_records=0,
+    sources=None,
+    progress_callback=None,
+):
     """
     Fetches NCBI + Ensembl genome data, returns unified list of genome metadata dicts.
     sources: list of "NCBI" and/or "Ensembl". If None, fetch both.
@@ -671,10 +819,14 @@ def get_genome_summary(tax_id: int, max_records, sources=None, progress_callback
 
     # Fetch all sources concurrently
     fetch_funcs = {
-        "NCBI": lambda: fetch_ncbi_genomes(tax_id, max_records, progress_callback=progress_callback),
+        "NCBI": lambda: fetch_ncbi_genomes(
+            tax_id, max_records, progress_callback=progress_callback
+        ),
         "Ensembl": lambda: fetch_ensembl_genomes(tax_id),
         "ENA": lambda: fetch_ena_genomes(tax_id),
-        "BV-BRC": lambda: fetch_bvbrc_genomes(tax_id, max_records=max_records),
+        "BV-BRC": lambda: fetch_bvbrc_genomes(
+            tax_id, max_records=max_bvbrc_records
+        ),
     }
 
     with ThreadPoolExecutor(max_workers=len(sources)) as executor:

@@ -30,6 +30,7 @@ class GenomeApp(tk.Tk):
         self.email_provided = False
         self.max_ncbi_genome_count = None
         self.max_ncbi_gene_count = None
+        self.max_bvbrc_genome_count = None
         self.genome_data = []
         self.taxonomy_data = None
 
@@ -280,25 +281,49 @@ class GenomeApp(tk.Tk):
                 args=(taxid, email, sources, export_dir, show_bar),
                 daemon=True,
             ).start()
+        elif "BV-BRC" in sources:
+            threading.Thread(
+                target=self.fetch_bvbrc_count_thread,
+                args=(taxid, sources, export_dir, show_bar),
+                daemon=True,
+            ).start()
         else:
             threading.Thread(
                 target=self.full_search_thread,
-                args=(taxid, None, None, sources, show_bar, export_dir),
+                args=(taxid, None, None, None, sources, show_bar, export_dir),
                 daemon=True,
             ).start()
 
     # ---------- NCBI Max Count Popup ----------
-    def fetch_counts_thread(self, taxid, email, sources, export_dir=None, show_bar=True):
+    def fetch_counts_thread(
+        self,
+        taxid,
+        email,
+        sources,
+        export_dir=None,
+        show_bar=True,
+    ):
         try:
             genome_count, gene_count = api_client.get_total_ncbi_genome_count(
                 taxid, email
             )
+            bvbrc_count = None
+            if "BV-BRC" in sources:
+                bvbrc_count = api_client.get_total_bvbrc_genome_count(taxid)
+
             self.max_ncbi_genome_count = genome_count
             self.max_ncbi_gene_count = gene_count
+            self.max_bvbrc_genome_count = bvbrc_count
             self.after(
                 0,
                 lambda: self.show_max_popup(
-                    genome_count, gene_count, taxid, sources, export_dir, show_bar
+                    genome_count,
+                    gene_count,
+                    bvbrc_count,
+                    taxid,
+                    sources,
+                    export_dir,
+                    show_bar,
                 ),
             )
         except Exception as e:
@@ -309,14 +334,39 @@ class GenomeApp(tk.Tk):
                 ),
             )
 
+    def fetch_bvbrc_count_thread(self, taxid, sources, export_dir=None, show_bar=True):
+        try:
+            bvbrc_count = api_client.get_total_bvbrc_genome_count(taxid)
+            self.max_bvbrc_genome_count = bvbrc_count
+            self.after(
+                0,
+                lambda: self.show_bvbrc_max_popup(
+                    bvbrc_count, taxid, sources, export_dir, show_bar
+                ),
+            )
+        except Exception as e:
+            self.after(
+                0,
+                lambda: messagebox.showerror(
+                    "Count Failed", f"Could not fetch BV-BRC count:\n{e}"
+                ),
+            )
+
     def show_max_popup(
-        self, genome_count, gene_count, taxid, sources, export_dir=None, show_bar=True
+        self,
+        genome_count,
+        gene_count,
+        bvbrc_count,
+        taxid,
+        sources,
+        export_dir=None,
+        show_bar=True,
     ):
         popup = tk.Toplevel(self)
         popup.title("NCBI Max Records")
         popup.grab_set()
 
-        ttk.Label(popup, text="Max genomic records:").grid(
+        ttk.Label(popup, text="Max NCBI genomic records:").grid(
             row=0, column=0, padx=6, pady=6, sticky="e"
         )
         max_genome_entry = ttk.Entry(popup, width=12)
@@ -324,7 +374,7 @@ class GenomeApp(tk.Tk):
         max_genome_entry.insert(0, str(genome_count))
         ttk.Label(popup, text=f"Max: {genome_count}").grid(row=0, column=2, sticky="w")
 
-        ttk.Label(popup, text="Max genetic records:").grid(
+        ttk.Label(popup, text="Max NCBI genetic records:").grid(
             row=1, column=0, padx=6, pady=6, sticky="e"
         )
         max_gene_entry = ttk.Entry(popup, width=12)
@@ -332,20 +382,86 @@ class GenomeApp(tk.Tk):
         max_gene_entry.insert(0, str(gene_count))
         ttk.Label(popup, text=f"Max: {gene_count}").grid(row=1, column=2, sticky="w")
 
+        max_bvbrc_entry = None
+        button_row = 2
+        if "BV-BRC" in sources:
+            ttk.Label(popup, text="Max BV-BRC genomic records:").grid(
+                row=2, column=0, padx=6, pady=6, sticky="e"
+            )
+            max_bvbrc_entry = ttk.Entry(popup, width=12)
+            max_bvbrc_entry.grid(row=2, column=1, sticky="w")
+            initial_bvbrc = bvbrc_count if bvbrc_count is not None else 0
+            max_bvbrc_entry.insert(0, str(initial_bvbrc))
+            max_text = f"Max: {bvbrc_count}" if bvbrc_count is not None else "0 = all"
+            ttk.Label(popup, text=max_text).grid(row=2, column=2, sticky="w")
+            button_row = 3
+
         def start_search():
             try:
                 max_genomes_val = int(max_genome_entry.get())
                 max_genes_val = int(max_gene_entry.get())
+                max_bvbrc_val = (
+                    int(max_bvbrc_entry.get()) if max_bvbrc_entry is not None else None
+                )
             except ValueError:
                 messagebox.showerror("Invalid Input", "Max records must be numeric")
                 return
             popup.destroy()
             self.on_start_search(
-                taxid, sources, max_genomes_val, max_genes_val, export_dir, show_bar
+                taxid,
+                sources,
+                max_genomes_val,
+                max_genes_val,
+                max_bvbrc_val,
+                export_dir,
+                show_bar,
             )
 
         ttk.Button(popup, text="Start Search", command=start_search).grid(
-            row=2, column=0, columnspan=3, pady=10
+            row=button_row, column=0, columnspan=3, pady=10
+        )
+
+    def show_bvbrc_max_popup(
+        self,
+        bvbrc_count,
+        taxid,
+        sources,
+        export_dir=None,
+        show_bar=True,
+    ):
+        popup = tk.Toplevel(self)
+        popup.title("BV-BRC Max Records")
+        popup.grab_set()
+
+        ttk.Label(popup, text="Max BV-BRC genomic records:").grid(
+            row=0, column=0, padx=6, pady=6, sticky="e"
+        )
+        max_bvbrc_entry = ttk.Entry(popup, width=12)
+        max_bvbrc_entry.grid(row=0, column=1, sticky="w")
+        max_bvbrc_entry.insert(0, str(bvbrc_count if bvbrc_count is not None else 0))
+        max_text = f"Max: {bvbrc_count}" if bvbrc_count is not None else "0 = all"
+        ttk.Label(popup, text=max_text).grid(row=0, column=2, sticky="w")
+
+        def start_search():
+            try:
+                max_bvbrc_val = int(max_bvbrc_entry.get())
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Max records must be numeric")
+                return
+
+            popup.destroy()
+            self.on_start_search(
+                taxid,
+                sources,
+                None,
+                None,
+                max_bvbrc_val,
+                export_dir,
+                show_bar,
+            )
+
+        ttk.Button(popup, text="Start Search", command=start_search).grid(
+            row=1, column=0, columnspan=3, pady=10
         )
 
     def on_start_search(
@@ -354,6 +470,7 @@ class GenomeApp(tk.Tk):
         sources,
         max_genomes=None,
         max_genes=None,
+        max_bvbrc_genomes=None,
         export_dir=None,
         show_bar=True,
     ):
@@ -370,7 +487,15 @@ class GenomeApp(tk.Tk):
 
         threading.Thread(
             target=self.full_search_thread,
-            args=(taxid, max_genomes, max_genes, sources, show_bar, export_dir),
+            args=(
+                taxid,
+                max_genomes,
+                max_genes,
+                max_bvbrc_genomes,
+                sources,
+                show_bar,
+                export_dir,
+            ),
             daemon=True,
         ).start()
 
@@ -407,6 +532,7 @@ class GenomeApp(tk.Tk):
         taxid,
         max_genomes,
         max_genes,
+        max_bvbrc_genomes,
         sources,
         show_bar=True,
         export_dir=None,
@@ -448,6 +574,7 @@ class GenomeApp(tk.Tk):
             summary = api_client.get_genome_summary(
                 taxid,
                 max_genomes or 0,
+                max_bvbrc_records=max_bvbrc_genomes or 0,
                 sources=sources,
                 progress_callback=genome_progress,
             )
