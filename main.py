@@ -31,6 +31,7 @@ class GenomeApp(tk.Tk):
         self.max_ncbi_genome_count = None
         self.max_ncbi_gene_count = None
         self.genome_data = []
+        self.taxonomy_data = None
 
         # --- runtime state ---
         self._search_running = False
@@ -129,13 +130,13 @@ class GenomeApp(tk.Tk):
 
         # --- Genome tab ---
         self.genome_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.genome_frame, text="Genome Info")
+        self.notebook.add(self.genome_frame, text="Genome data")
         self._build_genome_table()
         self._build_genome_filters()
 
         # --- Gene tab ---
         self.gene_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.gene_frame, text="Gene Info")
+        self.notebook.add(self.gene_frame, text="Genetic data")
         self._build_gene_table()
 
         # --- Summary tab ---
@@ -263,6 +264,9 @@ class GenomeApp(tk.Tk):
         elif "NCBI" in sources:
             email = self.user_email
 
+        # Auto-export mode does not populate interactive data tabs.
+        self.set_data_tabs_enabled(not auto_export)
+
         # --- Use proper popup ---
         show_bar = not auto_export and "NCBI" in sources
 
@@ -377,6 +381,27 @@ class GenomeApp(tk.Tk):
         self.search_btn.config(state=state)
         self.taxid_entry.config(state=state)
 
+    def set_data_tabs_enabled(self, enabled: bool):
+        state = "normal" if enabled else "disabled"
+        for tab_frame in (
+            self.taxonomy_frame,
+            self.genome_frame,
+            self.gene_frame,
+            self.summary_frame,
+        ):
+            self.notebook.tab(tab_frame, state=state)
+
+        if not enabled:
+            selected = self.notebook.select()
+            disabled_tabs = {
+                str(self.taxonomy_frame),
+                str(self.genome_frame),
+                str(self.gene_frame),
+                str(self.summary_frame),
+            }
+            if selected in disabled_tabs:
+                self.notebook.select(self.search_frame)
+
     def full_search_thread(
         self,
         taxid,
@@ -388,6 +413,7 @@ class GenomeApp(tk.Tk):
     ):
         # Reset data at start of search
         self.genome_data = []
+        self.taxonomy_data = None
 
         def update_progress_label(text):
             self.after(0, lambda: self.progress_text_only.config(text=text))
@@ -401,6 +427,7 @@ class GenomeApp(tk.Tk):
         update_progress_label("Fetching taxonomy data...")
         try:
             tax_data = api_client.fetch_ncbi_taxonomy(taxid)
+            self.taxonomy_data = tax_data
             self.build_taxonomy_tree(tax_data)
         except Exception:
             logging.exception("Failed to fetch taxonomy")
@@ -474,7 +501,12 @@ class GenomeApp(tk.Tk):
 
         if export_dir:
             try:
-                csv_path, html_path = reports._export_results(export_dir, taxid, self.genome_data)
+                csv_path, html_path = reports._export_results(
+                    export_dir,
+                    taxid,
+                    self.genome_data,
+                    taxonomy_data=self.taxonomy_data,
+                )
                 self.after(
                     0,
                     lambda: messagebox.showinfo(
@@ -776,7 +808,12 @@ class GenomeApp(tk.Tk):
             return
 
         try:
-            reports._write_html_report(path, self.genome_data, open_after=True)
+            reports._write_html_report(
+                path,
+                self.genome_data,
+                taxonomy_data=self.taxonomy_data,
+                open_after=True,
+            )
             messagebox.showinfo("Exported", f"Saved report to {path}")
         except Exception as e:
             logging.exception("Failed to export HTML report")
