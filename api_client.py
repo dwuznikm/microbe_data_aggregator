@@ -1,5 +1,7 @@
 import requests
 import time
+import os
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
 import threading
@@ -15,6 +17,33 @@ BASE_URL_BVBRC = "https://www.bv-brc.org/api"
 
 BASE_URL_ENSEMBL = "https://rest.ensembl.org"
 NCBI_API_KEY = "ad05b3160b82232233a302e84033a1eb8307"
+
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+FETCH_TIMING_LOG_PATH = os.path.join(LOG_DIR, "fetch_timing.log")
+
+fetch_timing_logger = logging.getLogger("microbe_data_aggregator.fetch_timing")
+if not fetch_timing_logger.handlers:
+    handler = logging.FileHandler(FETCH_TIMING_LOG_PATH, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    fetch_timing_logger.addHandler(handler)
+fetch_timing_logger.setLevel(logging.INFO)
+fetch_timing_logger.propagate = False
+
+
+def _log_fetch_timing(operation, tax_id, start_time, status="ok", records=None, details=None):
+    elapsed = time.perf_counter() - start_time
+    parts = [
+        f"operation={operation}",
+        f"tax_id={tax_id}",
+        f"status={status}",
+        f"elapsed_s={elapsed:.3f}",
+    ]
+    if records is not None:
+        parts.append(f"records={records}")
+    if details:
+        parts.append(f"details={details}")
+    fetch_timing_logger.info(" | ".join(parts))
 
 
 def fetch_json_from_api(url: str, database=None, params=None, retries=None, delay=0.1):
@@ -59,6 +88,8 @@ def fetch_json_from_api(url: str, database=None, params=None, retries=None, dela
 
 def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callback=None):
     url = f"{BASE_URL_NCBI}/genome/taxon/{tax_id}/dataset_report"
+    start_time = time.perf_counter()
+    limit = int(max_records or 0)
     all_reports = []
     token_queue = Queue()
     lock = threading.Lock()
@@ -72,16 +103,50 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
     first = fetch_json_from_api(url, "NCBI")
     if not first:
         print("Failed initial fetch.")
+        _log_fetch_timing(
+            "genome_fetch_ncbi",
+            tax_id,
+            start_time,
+            status="no_data",
+            records=0,
+            details="initial request failed",
+        )
         return {"reports": []}
 
     reports = first.get("reports", [])
     with lock:
         all_reports.extend(reports)
+        if limit > 0 and len(all_reports) > limit:
+            del all_reports[limit:]
+
+    if progress_callback:
+        target = limit if limit > 0 else len(all_reports)
+        progress_callback(len(all_reports), target)
+
+    if limit > 0 and len(all_reports) >= limit:
+        print(f"Reached requested max genome records ({limit}) on first page.")
+        _log_fetch_timing(
+            "genome_fetch_ncbi",
+            tax_id,
+            start_time,
+            status="max_reached",
+            records=len(all_reports[:limit]),
+            details="reached limit on first page",
+        )
+        return {"reports": all_reports[:limit]}
 
     next_token = first.get("next_page_token")
     if not next_token:
         print("Only one page found.")
-        return {"reports": all_reports}
+        final_reports = all_reports[:limit] if limit > 0 else all_reports
+        _log_fetch_timing(
+            "genome_fetch_ncbi",
+            tax_id,
+            start_time,
+            status="single_page",
+            records=len(final_reports),
+        )
+        return {"reports": final_reports}
 
     token_queue.put(next_token)
 
@@ -109,10 +174,13 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
 
             with lock:
                 all_reports.extend(new_reports)
+                if limit > 0 and len(all_reports) > limit:
+                    del all_reports[limit:]
                 total = len(all_reports)
                 if progress_callback:
-                    progress_callback(total, max_records)  # <-- faktyczny postęp
-                if total >= max_records:
+                    target = limit if limit > 0 else total
+                    progress_callback(total, target)
+                if limit > 0 and total >= limit:
                     stop_flag.set()
 
             if next_token and not stop_flag.is_set():
@@ -133,7 +201,7 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
         time.sleep(0.5)
         with lock:
             total = len(all_reports)
-        if total >= max_records:
+        if limit > 0 and total >= limit:
             stop_flag.set()
         # Stop when both conditions hold: queue empty + all workers idle
         if token_queue.empty() and all(
@@ -157,15 +225,45 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
         t.join(timeout=0.5)
 
     print(f"Completed: {len(all_reports)} genome records fetched across threads.\n")
-    return {"reports": all_reports[:max_records]}
+    final_reports = all_reports[:limit] if limit > 0 else all_reports
+    status = "max_reached" if limit > 0 and len(final_reports) >= limit else "completed"
+    _log_fetch_timing(
+        "genome_fetch_ncbi",
+        tax_id,
+        start_time,
+        status=status,
+        records=len(final_reports),
+    )
+    return {"reports": final_reports}
 
 
 def fetch_ncbi_taxonomy(tax_id: int):
     """
     Fetch taxonomy report for a given tax_id.
     """
+    start_time = time.perf_counter()
     url = f"{BASE_URL_NCBI}/taxonomy/taxon/{tax_id}/dataset_report"
-    return fetch_json_from_api(url, "NCBI")
+    try:
+        data = fetch_json_from_api(url, "NCBI")
+        records = len(data.get("reports", [])) if isinstance(data, dict) else 0
+        status = "ok" if data else "no_data"
+        _log_fetch_timing(
+            "taxonomy_fetch_ncbi",
+            tax_id,
+            start_time,
+            status=status,
+            records=records,
+        )
+        return data
+    except Exception as e:
+        _log_fetch_timing(
+            "taxonomy_fetch_ncbi",
+            tax_id,
+            start_time,
+            status="error",
+            details=str(e),
+        )
+        raise
 
 
 def extract_ncbi_genome_metadata(report: dict):
@@ -233,10 +331,15 @@ def fetch_ncbi_genes(tax_id: int, max_records, progress_callback=None):
     Fetch all gene reports for a given tax_id from NCBI Datasets API with pagination.
     Displays progress with page numbers and total records fetched.
     """
+    start_time = time.perf_counter()
     url = f"{BASE_URL_NCBI}/gene/taxon/{tax_id}"
     all_reports = []
     next_page_token = None
     page_count = 0
+
+    limit = int(max_records or 0)
+    end_status = "completed"
+    end_details = None
 
     while True:
         params = {}
@@ -249,23 +352,54 @@ def fetch_ncbi_genes(tax_id: int, max_records, progress_callback=None):
         data = fetch_json_from_api(url, "NCBI", params)
         if not data:
             print("No data returned or request failed.")
+            end_status = "no_data"
+            end_details = "request failed or empty response"
             break
 
         reports = data.get("reports", [])
         all_reports.extend(reports)
+
+        if limit > 0 and len(all_reports) >= limit:
+            all_reports = all_reports[:limit]
+
         if progress_callback:
-            progress_callback(len(all_reports), max_records)
+            target = limit if limit > 0 else len(all_reports)
+            progress_callback(len(all_reports), target)
+
         print(
             f"→ Page {page_count} fetched: {len(reports)} records (total: {len(all_reports)})."
         )
-        if len(all_reports) >= max_records:
+
+        if limit > 0 and len(all_reports) >= limit:
+            print(
+                f"Reached requested max gene records ({limit}). "
+                f"Completed after {page_count} pages."
+            )
+            end_status = "max_reached"
+            end_details = f"completed after {page_count} pages"
             break
+
         next_page_token = data.get("next_page_token")
         if not next_page_token:
             print(
                 f"Completed fetching {page_count} pages ({len(all_reports)} total gene reports)."
             )
+            end_status = "completed"
+            end_details = f"completed after {page_count} pages"
             break
+
+    if page_count == 0:
+        print("Completed fetching 0 pages (0 total gene reports).")
+
+    _log_fetch_timing(
+        "gene_fetch_ncbi",
+        tax_id,
+        start_time,
+        status=end_status,
+        records=len(all_reports),
+        details=end_details,
+    )
+
     return {"reports": all_reports}
 
 
@@ -330,8 +464,29 @@ def get_gene_summary(tax_id: int, max_records, progress_callback=None):
 
 
 def fetch_ensembl_genomes(tax_id: int):
+    start_time = time.perf_counter()
     url = f"{BASE_URL_ENSEMBL}/info/genomes/taxonomy/{tax_id}"
-    return fetch_json_from_api(url)
+    try:
+        data = fetch_json_from_api(url)
+        records = len(data) if isinstance(data, list) else 0
+        status = "ok" if data is not None else "no_data"
+        _log_fetch_timing(
+            "genome_fetch_ensembl",
+            tax_id,
+            start_time,
+            status=status,
+            records=records,
+        )
+        return data
+    except Exception as e:
+        _log_fetch_timing(
+            "genome_fetch_ensembl",
+            tax_id,
+            start_time,
+            status="error",
+            details=str(e),
+        )
+        raise
 
 
 def extract_ensembl_genome_metadata(genome: dict):
@@ -363,8 +518,29 @@ def extract_ensembl_genome_metadata(genome: dict):
 
 
 def fetch_ena_genomes(tax_id: int):
+    start_time = time.perf_counter()
     url = f"{BASE_URL_ENA}?result=assembly&query=tax_eq({tax_id})&fields=accession,assembly_level,base_count&format=json"
-    return fetch_json_from_api(url)
+    try:
+        data = fetch_json_from_api(url)
+        records = len(data) if isinstance(data, list) else 0
+        status = "ok" if data is not None else "no_data"
+        _log_fetch_timing(
+            "genome_fetch_ena",
+            tax_id,
+            start_time,
+            status=status,
+            records=records,
+        )
+        return data
+    except Exception as e:
+        _log_fetch_timing(
+            "genome_fetch_ena",
+            tax_id,
+            start_time,
+            status="error",
+            details=str(e),
+        )
+        raise
 
 
 def extract_ena_genome_metadata(genome: dict):
@@ -394,9 +570,65 @@ def extract_ena_genome_metadata(genome: dict):
 # --- BV-BRC ---
 
 
-def fetch_bvbrc_genomes(tax_id: int):
-    url = f"{BASE_URL_BVBRC}/genome/?eq(taxon_id,{tax_id})&http_accept=application/json"
-    return fetch_json_from_api(url)
+def fetch_bvbrc_genomes(tax_id: int, max_records=0, page_size=250):
+    start_time = time.perf_counter()
+    limit = int(max_records or 0)
+    start = 0
+    pages = 0
+    all_records = []
+    end_status = "completed"
+    end_details = None
+
+    try:
+        while True:
+            url = (
+                f"{BASE_URL_BVBRC}/genome/?eq(taxon_id,{tax_id})"
+                f"&limit({page_size},{start})&http_accept=application/json"
+            )
+            page_data = fetch_json_from_api(url)
+
+            if not page_data:
+                if pages == 0:
+                    end_status = "no_data"
+                break
+
+            if not isinstance(page_data, list):
+                end_status = "unexpected_response"
+                end_details = f"type={type(page_data).__name__}"
+                break
+
+            pages += 1
+            all_records.extend(page_data)
+
+            if limit > 0 and len(all_records) >= limit:
+                all_records = all_records[:limit]
+                end_status = "max_reached"
+                end_details = f"completed after {pages} pages"
+                break
+
+            if len(page_data) < page_size:
+                break
+
+            start += page_size
+
+        _log_fetch_timing(
+            "genome_fetch_bvbrc",
+            tax_id,
+            start_time,
+            status=end_status,
+            records=len(all_records),
+            details=end_details,
+        )
+        return all_records
+    except Exception as e:
+        _log_fetch_timing(
+            "genome_fetch_bvbrc",
+            tax_id,
+            start_time,
+            status="error",
+            details=str(e),
+        )
+        raise
 
 
 def extract_bvbrc_genome_metadata(genome: dict):
@@ -435,22 +667,14 @@ def get_genome_summary(tax_id: int, max_records, sources=None, progress_callback
     if sources is None:
         sources = ["NCBI", "Ensembl", "ENA", "BV-BRC"]
 
-    taxonomy_data = fetch_ncbi_taxonomy(tax_id)
     summary = {"tax_id": tax_id, "organism": "Unknown", "genomes": []}
-
-    try:
-        summary["organism"] = taxonomy_data["reports"][0]["taxonomy"][
-            "current_scientific_name"
-        ]["name"]
-    except Exception:
-        pass
 
     # Fetch all sources concurrently
     fetch_funcs = {
         "NCBI": lambda: fetch_ncbi_genomes(tax_id, max_records, progress_callback=progress_callback),
         "Ensembl": lambda: fetch_ensembl_genomes(tax_id),
         "ENA": lambda: fetch_ena_genomes(tax_id),
-        "BV-BRC": lambda: fetch_bvbrc_genomes(tax_id),
+        "BV-BRC": lambda: fetch_bvbrc_genomes(tax_id, max_records=max_records),
     }
 
     with ThreadPoolExecutor(max_workers=len(sources)) as executor:

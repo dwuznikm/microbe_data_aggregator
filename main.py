@@ -452,11 +452,12 @@ class GenomeApp(tk.Tk):
                 progress_callback=genome_progress,
             )
             genomes = summary.get("genomes", [])
-            self.genome_data.extend(genomes)
             if not export_dir:
                 self.after(
                     0, lambda g=genomes: self.append_genomes(g)
                 )
+            else:
+                self.genome_data.extend(genomes)
         except Exception as e:
             logging.exception("Failed to fetch genomic data")
             self.after(
