@@ -120,6 +120,8 @@ def _write_html_report(path, genomes, taxid=None, taxonomy_data=None, open_after
     source_counts = Counter(g.get("Source") or "Unknown" for g in report_genomes)
     colors = {
         "NCBI": "#d62728",
+        "REFSEQ": "#d62728",
+        "GENBANK": "#ff7f0e",
         "ENA": "#1f77b4",
         "Ensembl": "#2ca02c",
         "BV-BRC": "#9467bd",

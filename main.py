@@ -777,6 +777,8 @@ class GenomeApp(tk.Tk):
         # Color scheme
         colors = {
             "NCBI": "#d62728",
+            "REFSEQ": "#d62728",
+            "GENBANK": "#ff7f0e",
             "ENA": "#1f77b4",
             "Ensembl": "#2ca02c",
             "BV-BRC": "#9467bd",
