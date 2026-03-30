@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
 import threading
 import time
-from Bio import Entrez
 import ssl
 
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -18,6 +17,7 @@ BASE_URL_BVBRC = "https://www.bv-brc.org/api"
 
 BASE_URL_ENSEMBL = "https://rest.ensembl.org"
 NCBI_API_KEY = "ad05b3160b82232233a302e84033a1eb8307"
+NCBI_PAGE_SIZE = 1000
 
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -175,7 +175,7 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
     )
 
     # --- Initial request (bootstrap) ---
-    first = fetch_json_from_api(url, "NCBI")
+    first = fetch_json_from_api(url, "NCBI", params={"page_size": NCBI_PAGE_SIZE})
     if not first:
         print("Failed initial fetch.")
         _log_fetch_timing(
@@ -239,7 +239,11 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
                 token_queue.task_done()
                 break
 
-            data = fetch_json_from_api(url, "NCBI", params={"page_token": token})
+            data = fetch_json_from_api(
+                url,
+                "NCBI",
+                params={"page_size": NCBI_PAGE_SIZE, "page_token": token},
+            )
             if not data:
                 token_queue.task_done()
                 continue
@@ -388,17 +392,20 @@ def extract_ncbi_genome_metadata(report: dict):
 # --- NCBI Gene ---
 
 
-def get_total_ncbi_genome_count(tax_id: int, email):
-    """
-    Fetch all gene reports for a given tax_id from NCBI Datasets API with pagination.
-    Displays progress with page numbers and total records fetched.
-    """
-    Entrez.email = email
-    handle_genome = Entrez.esearch(db="assembly", term=f"txid{tax_id}[Organism:exp]")
-    record_genome = Entrez.read(handle_genome)
-    handle_gene = Entrez.esearch(db="gene", term=f"txid{tax_id}[Organism:exp]")
-    record_gene = Entrez.read(handle_gene)
-    return record_genome["Count"], record_gene["Count"]
+def get_total_ncbi_genome_count(tax_id: int):
+    """Fetch genome and gene total_count values from NCBI Datasets endpoints."""
+    genome_url = f"{BASE_URL_NCBI}/genome/taxon/{tax_id}/dataset_report"
+    gene_url = f"{BASE_URL_NCBI}/gene/taxon/{tax_id}"
+
+    genome_data = fetch_json_from_api(genome_url, "NCBI")
+    gene_data = fetch_json_from_api(gene_url, "NCBI")
+
+    if not genome_data:
+        raise RuntimeError("Could not fetch NCBI genome total_count")
+    if not gene_data:
+        raise RuntimeError("Could not fetch NCBI gene total_count")
+
+    return int(genome_data.get("total_count", 0)), int(gene_data.get("total_count", 0))
 
 
 def fetch_ncbi_genes(tax_id: int, max_records, progress_callback=None):
@@ -417,7 +424,7 @@ def fetch_ncbi_genes(tax_id: int, max_records, progress_callback=None):
     end_details = None
 
     while True:
-        params = {}
+        params = {"page_size": NCBI_PAGE_SIZE}
         if next_page_token:
             params["page_token"] = next_page_token
 

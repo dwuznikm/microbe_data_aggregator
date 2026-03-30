@@ -4,7 +4,7 @@ import os
 from io import BytesIO
 
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog, filedialog
+from tkinter import ttk, messagebox, filedialog
 import webbrowser
 import threading
 import matplotlib.pyplot as plt
@@ -26,8 +26,6 @@ class GenomeApp(tk.Tk):
         self.geometry("1100x650")
 
         # --- session state ---
-        self.user_email = None
-        self.email_provided = False
         self.max_ncbi_genome_count = None
         self.max_ncbi_gene_count = None
         self.max_bvbrc_genome_count = None
@@ -253,18 +251,6 @@ class GenomeApp(tk.Tk):
         if self.ncbi_var.get():
             sources.append("NCBI")
 
-        email = None
-        if "NCBI" in sources and not self.email_provided:
-            email = simpledialog.askstring(
-                "NCBI Email", "Enter your email for NCBI Entrez:", parent=self
-            )
-            if not email:
-                return
-            self.user_email = email
-            self.email_provided = True
-        elif "NCBI" in sources:
-            email = self.user_email
-
         # Auto-export mode does not populate interactive data tabs.
         self.set_data_tabs_enabled(not auto_export)
 
@@ -278,7 +264,7 @@ class GenomeApp(tk.Tk):
         if "NCBI" in sources:
             threading.Thread(
                 target=self.fetch_counts_thread,
-                args=(taxid, email, sources, export_dir, show_bar),
+                args=(taxid, sources, export_dir, show_bar),
                 daemon=True,
             ).start()
         elif "BV-BRC" in sources:
@@ -298,15 +284,12 @@ class GenomeApp(tk.Tk):
     def fetch_counts_thread(
         self,
         taxid,
-        email,
         sources,
         export_dir=None,
         show_bar=True,
     ):
         try:
-            genome_count, gene_count = api_client.get_total_ncbi_genome_count(
-                taxid, email
-            )
+            genome_count, gene_count = api_client.get_total_ncbi_genome_count(taxid)
             bvbrc_count = None
             if "BV-BRC" in sources:
                 bvbrc_count = api_client.get_total_bvbrc_genome_count(taxid)
@@ -329,7 +312,7 @@ class GenomeApp(tk.Tk):
         except Exception as e:
             self.after(
                 0,
-                lambda: messagebox.showerror(
+                lambda e=e: messagebox.showerror(
                     "Count Failed", f"Could not fetch counts:\n{e}"
                 ),
             )
@@ -347,7 +330,7 @@ class GenomeApp(tk.Tk):
         except Exception as e:
             self.after(
                 0,
-                lambda: messagebox.showerror(
+                lambda e=e: messagebox.showerror(
                     "Count Failed", f"Could not fetch BV-BRC count:\n{e}"
                 ),
             )
@@ -564,7 +547,12 @@ class GenomeApp(tk.Tk):
         if "NCBI" in sources:
             self.after(0, lambda: self.progress_text_only.pack_forget())
             self.after(0, lambda: self.progress_frame.pack())
-            self.after(0, lambda: self.progress_label.config(text="Fetching genomic data from multiple sources..."))
+            self.after(
+                0,
+                lambda: self.progress_label.config(
+                    text="Fetching genomic data from multiple sources..."
+                ),
+            )
 
         def genome_progress(current, total):
             pct = min(100, int(current / total * 100)) if total else 0
@@ -580,9 +568,7 @@ class GenomeApp(tk.Tk):
             )
             genomes = summary.get("genomes", [])
             if not export_dir:
-                self.after(
-                    0, lambda g=genomes: self.append_genomes(g)
-                )
+                self.after(0, lambda g=genomes: self.append_genomes(g))
             else:
                 self.genome_data.extend(genomes)
         except Exception as e:
@@ -597,7 +583,12 @@ class GenomeApp(tk.Tk):
         # --- Genes (NCBI only) ---
         if "NCBI" in sources:
             update_progress_label("Fetching NCBI genetic data...")
-            self.after(0, lambda: self.progress_label.config(text="Fetching NCBI genetic data..."))
+            self.after(
+                0,
+                lambda: self.progress_label.config(
+                    text="Fetching NCBI genetic data..."
+                ),
+            )
 
             def gene_progress(current, total):
                 pct = min(100, int(current / total * 100)) if total else 0
