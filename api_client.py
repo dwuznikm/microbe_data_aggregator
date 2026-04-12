@@ -47,13 +47,15 @@ def _log_fetch_timing(operation, tax_id, start_time, status="ok", records=None, 
     fetch_timing_logger.info(" | ".join(parts))
 
 
-def fetch_json_from_api(url: str, database=None, params=None, retries=None, delay=0.1):
+def fetch_json_from_api(
+    url: str, database=None, params=None, retries=None, delay=0.1, stop_event=None
+):
     """
     Fetch JSON from API with retries and constant delay.
     Supports NCBI API key for increased rate limits (10 req/sec).
     """
     if retries is None:
-        retries = 25 if database == "NCBI" else 2
+        retries = 25 if database == "NCBI" else 4
     headers = {"Accept": "application/json", "User-Agent": "MicrobeDataAggregator/0.1"}
 
     params = dict(params or {})
@@ -61,6 +63,8 @@ def fetch_json_from_api(url: str, database=None, params=None, retries=None, dela
         params["api_key"] = NCBI_API_KEY
 
     for attempt in range(retries):
+        if stop_event and stop_event.is_set():
+            return None
         try:
             response = requests.get(url, headers=headers, params=params, timeout=30)
             response.raise_for_status()
@@ -72,7 +76,8 @@ def fetch_json_from_api(url: str, database=None, params=None, retries=None, dela
             # Retry for transient server or rate-limit errors
             if status in (429, 500, 502, 503, 504):
                 print(f"Server error {status}, retrying ({attempt+1}/{retries})...")
-                time.sleep(delay)
+                if stop_event and stop_event.wait(delay):
+                    return None
                 continue
 
             print(f"Non-retryable HTTP error {status}: {e}")
@@ -80,7 +85,8 @@ def fetch_json_from_api(url: str, database=None, params=None, retries=None, dela
 
         except requests.exceptions.RequestException as e:
             print(f"Request failed: {e}")
-            time.sleep(delay)
+            if stop_event and stop_event.wait(delay):
+                return None
             continue
 
     print(f"Giving up after {retries} attempts for URL: {url}")
@@ -88,11 +94,11 @@ def fetch_json_from_api(url: str, database=None, params=None, retries=None, dela
 
 
 def fetch_json_and_headers_from_api(
-    url: str, database=None, params=None, retries=None, delay=0.1
+    url: str, database=None, params=None, retries=None, delay=0.1, stop_event=None
 ):
     """Fetch JSON payload with response headers."""
     if retries is None:
-        retries = 25 if database == "NCBI" else 2
+        retries = 25 if database == "NCBI" else 4
     headers = {"Accept": "application/json", "User-Agent": "MicrobeDataAggregator/0.1"}
 
     params = dict(params or {})
@@ -100,6 +106,8 @@ def fetch_json_and_headers_from_api(
         params["api_key"] = NCBI_API_KEY
 
     for attempt in range(retries):
+        if stop_event and stop_event.is_set():
+            return None, {}
         try:
             response = requests.get(url, headers=headers, params=params, timeout=30)
             response.raise_for_status()
@@ -110,7 +118,8 @@ def fetch_json_and_headers_from_api(
 
             if status in (429, 500, 502, 503, 504):
                 print(f"Server error {status}, retrying ({attempt+1}/{retries})...")
-                time.sleep(delay)
+                if stop_event and stop_event.wait(delay):
+                    return None, {}
                 continue
 
             print(f"Non-retryable HTTP error {status}: {e}")
@@ -118,7 +127,8 @@ def fetch_json_and_headers_from_api(
 
         except requests.exceptions.RequestException as e:
             print(f"Request failed: {e}")
-            time.sleep(delay)
+            if stop_event and stop_event.wait(delay):
+                return None, {}
             continue
 
     print(f"Giving up after {retries} attempts for URL: {url}")
@@ -161,7 +171,13 @@ def get_total_bvbrc_genome_count(tax_id: int):
     return 0
 
 
-def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callback=None):
+def fetch_ncbi_genomes(
+    tax_id: int,
+    max_records,
+    max_workers=6,
+    progress_callback=None,
+    stop_event=None,
+):
     url = f"{BASE_URL_NCBI}/genome/taxon/{tax_id}/dataset_report"
     start_time = time.perf_counter()
     limit = int(max_records or 0)
@@ -170,12 +186,20 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
     lock = threading.Lock()
     stop_flag = threading.Event()
 
+    def should_stop():
+        return stop_flag.is_set() or (stop_event and stop_event.is_set())
+
     print(
         f"Starting concurrent genome fetch for tax_id={tax_id} ({max_workers} threads)..."
     )
 
     # --- Initial request (bootstrap) ---
-    first = fetch_json_from_api(url, "NCBI", params={"page_size": NCBI_PAGE_SIZE})
+    first = fetch_json_from_api(
+        url,
+        "NCBI",
+        params={"page_size": NCBI_PAGE_SIZE},
+        stop_event=stop_event,
+    )
     if not first:
         print("Failed initial fetch.")
         _log_fetch_timing(
@@ -227,7 +251,7 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
 
     def worker():
         nonlocal all_reports
-        while not stop_flag.is_set():
+        while not should_stop():
             try:
                 token = token_queue.get(timeout=2)
             except Empty:
@@ -243,6 +267,7 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
                 url,
                 "NCBI",
                 params={"page_size": NCBI_PAGE_SIZE, "page_token": token},
+                stop_event=stop_event,
             )
             if not data:
                 token_queue.task_done()
@@ -262,7 +287,7 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
                 if limit > 0 and total >= limit:
                     stop_flag.set()
 
-            if next_token and not stop_flag.is_set():
+            if next_token and not should_stop():
                 token_queue.put(next_token)
 
             token_queue.task_done()
@@ -277,18 +302,19 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
 
     # --- Main thread watcher loop ---
     while True:
-        time.sleep(0.5)
+        if stop_event and stop_event.wait(0.5):
+            stop_flag.set()
         with lock:
             total = len(all_reports)
         if limit > 0 and total >= limit:
             stop_flag.set()
         # Stop when both conditions hold: queue empty + all workers idle
         if token_queue.empty() and all(
-            not t.is_alive() or stop_flag.is_set() for t in threads
+            not t.is_alive() or should_stop() for t in threads
         ):
             break
         # Safety timeout to avoid infinite wait
-        if stop_flag.is_set() and token_queue.empty():
+        if should_stop() and token_queue.empty():
             break
 
     # --- Clean shutdown ---
@@ -305,7 +331,10 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
 
     print(f"Completed: {len(all_reports)} genome records fetched across threads.\n")
     final_reports = all_reports[:limit] if limit > 0 else all_reports
-    status = "max_reached" if limit > 0 and len(final_reports) >= limit else "completed"
+    if stop_event and stop_event.is_set():
+        status = "cancelled"
+    else:
+        status = "max_reached" if limit > 0 and len(final_reports) >= limit else "completed"
     _log_fetch_timing(
         "genome_fetch_ncbi",
         tax_id,
@@ -316,14 +345,14 @@ def fetch_ncbi_genomes(tax_id: int, max_records, max_workers=6, progress_callbac
     return {"reports": final_reports}
 
 
-def fetch_ncbi_taxonomy(tax_id: int):
+def fetch_ncbi_taxonomy(tax_id: int, stop_event=None):
     """
     Fetch taxonomy report for a given tax_id.
     """
     start_time = time.perf_counter()
     url = f"{BASE_URL_NCBI}/taxonomy/taxon/{tax_id}/dataset_report"
     try:
-        data = fetch_json_from_api(url, "NCBI")
+        data = fetch_json_from_api(url, "NCBI", stop_event=stop_event)
         records = len(data.get("reports", [])) if isinstance(data, dict) else 0
         status = "ok" if data else "no_data"
         _log_fetch_timing(
@@ -345,6 +374,84 @@ def fetch_ncbi_taxonomy(tax_id: int):
         raise
 
 
+def _clean_geo_text(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null", "na", "n/a", "not provided"}:
+        return ""
+    return text
+
+
+def _split_country_region(location):
+    text = _clean_geo_text(location)
+    if not text:
+        return "", ""
+
+    parts = [p.strip() for p in text.replace(";", ":").split(":") if p.strip()]
+    if not parts:
+        return "", ""
+
+    country = parts[0]
+    region = ": ".join(parts[1:]) if len(parts) > 1 else ""
+    return country, region
+
+
+def _extract_biosample_geo_fields(biosample):
+    attrs = biosample.get("attributes", []) if isinstance(biosample, dict) else []
+    attr_map = {}
+    for item in attrs:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("name", "")).strip().lower()
+        value = _clean_geo_text(item.get("value"))
+        if key and value and key not in attr_map:
+            attr_map[key] = value
+
+    country = (
+        attr_map.get("geo_loc_name")
+        or attr_map.get("geographic location (country and/or sea)")
+        or attr_map.get("country")
+    )
+    region = (
+        attr_map.get("state")
+        or attr_map.get("region")
+        or attr_map.get("province")
+        or attr_map.get("state/province")
+    )
+    collection_location = (
+        attr_map.get("geographic location")
+        or attr_map.get("geo_loc_name")
+        or country
+    )
+
+    inferred_country, inferred_region = _split_country_region(country)
+    country = inferred_country or country
+    region = region or inferred_region
+
+    lat_lon = _clean_geo_text(
+        attr_map.get("lat_lon")
+        or attr_map.get("latitude and longitude")
+        or attr_map.get("location")
+    )
+    latitude = _clean_geo_text(attr_map.get("latitude"))
+    longitude = _clean_geo_text(attr_map.get("longitude"))
+
+    if lat_lon and (not latitude and not longitude):
+        if "," in lat_lon:
+            pieces = [p.strip() for p in lat_lon.split(",")]
+            if len(pieces) >= 2:
+                latitude, longitude = pieces[0], pieces[1]
+
+    return {
+        "Country": _clean_geo_text(country),
+        "Region": _clean_geo_text(region),
+        "Collection Location": _clean_geo_text(collection_location),
+        "Latitude": _clean_geo_text(latitude),
+        "Longitude": _clean_geo_text(longitude),
+    }
+
+
 def extract_ncbi_genome_metadata(report: dict):
     """
     Extract and normalize genome metadata from an NCBI genome report.
@@ -360,6 +467,8 @@ def extract_ncbi_genome_metadata(report: dict):
         assembly_info = report.get("assembly_info", {})
         assembly_stats = report.get("assembly_stats", {})
         annotation_info = report.get("annotation_info", {})
+        biosample = assembly_info.get("biosample", {})
+        geo_fields = _extract_biosample_geo_fields(biosample)
 
         assembly_level = assembly_info.get("assembly_level", "Unknown")
         seq_len = assembly_stats.get("total_sequence_length")
@@ -384,6 +493,11 @@ def extract_ncbi_genome_metadata(report: dict):
             "Source": source_database,
             "Reference": ref_genome,
             "Link": link,
+            "Country": geo_fields.get("Country", ""),
+            "Region": geo_fields.get("Region", ""),
+            "Collection Location": geo_fields.get("Collection Location", ""),
+            "Latitude": geo_fields.get("Latitude", ""),
+            "Longitude": geo_fields.get("Longitude", ""),
         }
     except Exception:
         return None
@@ -408,7 +522,7 @@ def get_total_ncbi_genome_count(tax_id: int):
     return int(genome_data.get("total_count", 0)), int(gene_data.get("total_count", 0))
 
 
-def fetch_ncbi_genes(tax_id: int, max_records, progress_callback=None):
+def fetch_ncbi_genes(tax_id: int, max_records, progress_callback=None, stop_event=None):
     """
     Fetch all gene reports for a given tax_id from NCBI Datasets API with pagination.
     Displays progress with page numbers and total records fetched.
@@ -424,6 +538,10 @@ def fetch_ncbi_genes(tax_id: int, max_records, progress_callback=None):
     end_details = None
 
     while True:
+        if stop_event and stop_event.is_set():
+            end_status = "cancelled"
+            end_details = f"cancelled after {page_count} pages"
+            break
         params = {"page_size": NCBI_PAGE_SIZE}
         if next_page_token:
             params["page_token"] = next_page_token
@@ -431,7 +549,7 @@ def fetch_ncbi_genes(tax_id: int, max_records, progress_callback=None):
         page_count += 1
         print(f"Fetching gene page {page_count}...")
 
-        data = fetch_json_from_api(url, "NCBI", params)
+        data = fetch_json_from_api(url, "NCBI", params, stop_event=stop_event)
         if not data:
             print("No data returned or request failed.")
             end_status = "no_data"
@@ -528,9 +646,14 @@ def extract_ncbi_gene_metadata(report: dict):
         return None
 
 
-def get_gene_summary(tax_id: int, max_records, progress_callback=None):
+def get_gene_summary(tax_id: int, max_records, progress_callback=None, stop_event=None):
     """Fetches and returns all NCBI gene metadata for a given tax_id."""
-    data = fetch_ncbi_genes(tax_id, max_records, progress_callback=progress_callback)
+    data = fetch_ncbi_genes(
+        tax_id,
+        max_records,
+        progress_callback=progress_callback,
+        stop_event=stop_event,
+    )
     if not data:
         return []
 
@@ -545,11 +668,11 @@ def get_gene_summary(tax_id: int, max_records, progress_callback=None):
 # --- Ensembl ---
 
 
-def fetch_ensembl_genomes(tax_id: int):
+def fetch_ensembl_genomes(tax_id: int, stop_event=None):
     start_time = time.perf_counter()
     url = f"{BASE_URL_ENSEMBL}/info/genomes/taxonomy/{tax_id}"
     try:
-        data = fetch_json_from_api(url)
+        data = fetch_json_from_api(url, stop_event=stop_event)
         records = len(data) if isinstance(data, list) else 0
         status = "ok" if data is not None else "no_data"
         _log_fetch_timing(
@@ -591,6 +714,11 @@ def extract_ensembl_genome_metadata(genome: dict):
             "Source": "Ensembl",
             "Reference": ref_genome,
             "Link": link,
+            "Country": "",
+            "Region": "",
+            "Collection Location": "",
+            "Latitude": "",
+            "Longitude": "",
         }
     except Exception:
         return None
@@ -599,11 +727,15 @@ def extract_ensembl_genome_metadata(genome: dict):
 # --- ENA ---
 
 
-def fetch_ena_genomes(tax_id: int):
+def fetch_ena_genomes(tax_id: int, stop_event=None):
     start_time = time.perf_counter()
-    url = f"{BASE_URL_ENA}?result=assembly&query=tax_eq({tax_id})&fields=accession,assembly_level,base_count&format=json"
+    url = (
+        f"{BASE_URL_ENA}?result=assembly&query=tax_eq({tax_id})"
+        "&fields=accession,assembly_level,base_count,country,location,lat,lon,collection_date,isolation_source"
+        "&format=json"
+    )
     try:
-        data = fetch_json_from_api(url)
+        data = fetch_json_from_api(url, stop_event=stop_event)
         records = len(data) if isinstance(data, list) else 0
         status = "ok" if data is not None else "no_data"
         _log_fetch_timing(
@@ -630,6 +762,8 @@ def extract_ena_genome_metadata(genome: dict):
         accession = genome.get("accession")
         assembly_level = genome.get("assembly_level", "Unknown")
         seq_len = genome.get("base_count")
+        country, inferred_region = _split_country_region(genome.get("country"))
+        region = inferred_region
 
         link = (
             f"https://www.ebi.ac.uk/ena/browser/view/{accession}" if accession else ""
@@ -644,6 +778,11 @@ def extract_ena_genome_metadata(genome: dict):
             "Source": "ENA",
             "Reference": "No",
             "Link": link,
+            "Country": _clean_geo_text(country),
+            "Region": _clean_geo_text(region),
+            "Collection Location": _clean_geo_text(genome.get("location")),
+            "Latitude": _clean_geo_text(genome.get("lat")),
+            "Longitude": _clean_geo_text(genome.get("lon")),
         }
     except Exception:
         return None
@@ -652,7 +791,13 @@ def extract_ena_genome_metadata(genome: dict):
 # --- BV-BRC ---
 
 
-def fetch_bvbrc_genomes(tax_id: int, max_records=0, page_size=250):
+def fetch_bvbrc_genomes(
+    tax_id: int,
+    max_records=0,
+    page_size=250,
+    progress_callback=None,
+    stop_event=None,
+):
     start_time = time.perf_counter()
     limit = int(max_records or 0)
     start = 0
@@ -669,7 +814,10 @@ def fetch_bvbrc_genomes(tax_id: int, max_records=0, page_size=250):
             f"{BASE_URL_BVBRC}/genome/?eq(taxon_id,{tax_id})"
             f"&limit({page_size},0)&http_accept=application/json"
         )
-        first_page, first_headers = fetch_json_and_headers_from_api(first_url)
+        first_page, first_headers = fetch_json_and_headers_from_api(
+            first_url,
+            stop_event=stop_event,
+        )
 
         if first_page is None:
             end_status = "no_data"
@@ -711,6 +859,10 @@ def fetch_bvbrc_genomes(tax_id: int, max_records=0, page_size=250):
         pages = 1
         all_records.extend(first_page)
 
+        if progress_callback:
+            progress_target = limit if limit > 0 else (planned_records or len(all_records))
+            progress_callback(len(all_records), progress_target)
+
         if limit > 0 and len(all_records) >= limit:
             all_records = all_records[:limit]
             end_status = "max_reached"
@@ -719,11 +871,15 @@ def fetch_bvbrc_genomes(tax_id: int, max_records=0, page_size=250):
             start = page_size
 
         while end_status == "completed":
+            if stop_event and stop_event.is_set():
+                end_status = "cancelled"
+                end_details = f"cancelled after {pages} pages"
+                break
             url = (
                 f"{BASE_URL_BVBRC}/genome/?eq(taxon_id,{tax_id})"
                 f"&limit({page_size},{start})&http_accept=application/json"
             )
-            page_data = fetch_json_from_api(url)
+            page_data = fetch_json_from_api(url, stop_event=stop_event)
 
             if not page_data:
                 break
@@ -735,6 +891,10 @@ def fetch_bvbrc_genomes(tax_id: int, max_records=0, page_size=250):
 
             pages += 1
             all_records.extend(page_data)
+
+            if progress_callback:
+                progress_target = limit if limit > 0 else (planned_records or len(all_records))
+                progress_callback(len(all_records), progress_target)
 
             if limit > 0 and len(all_records) >= limit:
                 all_records = all_records[:limit]
@@ -788,6 +948,14 @@ def extract_bvbrc_genome_metadata(genome: dict):
         rrna = genome.get("rrna", 0)
         trna = genome.get("trna", 0)
         gene_count = cds + rrna + trna
+        country = _clean_geo_text(genome.get("isolation_country"))
+        region = _clean_geo_text(genome.get("state_province"))
+        location = _clean_geo_text(genome.get("geographic_location") or genome.get("city"))
+
+        if not country and location:
+            country, inferred_region = _split_country_region(location)
+            if not region:
+                region = inferred_region
 
         return {
             "Accession": accession,
@@ -800,6 +968,11 @@ def extract_bvbrc_genome_metadata(genome: dict):
             "Link": (
                 f"https://www.bv-brc.org/view/Genome/{accession}" if accession else ""
             ),
+            "Country": country,
+            "Region": region,
+            "Collection Location": location,
+            "Latitude": _clean_geo_text(genome.get("latitude")),
+            "Longitude": _clean_geo_text(genome.get("longitude")),
         }
     except Exception:
         return None
@@ -814,6 +987,7 @@ def get_genome_summary(
     max_bvbrc_records=0,
     sources=None,
     progress_callback=None,
+    stop_event=None,
 ):
     """
     Fetches NCBI + Ensembl genome data, returns unified list of genome metadata dicts.
@@ -824,15 +998,34 @@ def get_genome_summary(
 
     summary = {"tax_id": tax_id, "organism": "Unknown", "genomes": []}
 
+    def _emit_progress(source, current, total):
+        if not progress_callback:
+            return
+        try:
+            progress_callback(source, current, total)
+        except TypeError:
+            # Backward compatibility with older two-argument callbacks.
+            progress_callback(current, total)
+
     # Fetch all sources concurrently
     fetch_funcs = {
         "NCBI": lambda: fetch_ncbi_genomes(
-            tax_id, max_records, progress_callback=progress_callback
+            tax_id,
+            max_records,
+            progress_callback=lambda current, total: _emit_progress(
+                "NCBI", current, total
+            ),
+            stop_event=stop_event,
         ),
-        "Ensembl": lambda: fetch_ensembl_genomes(tax_id),
-        "ENA": lambda: fetch_ena_genomes(tax_id),
+        "Ensembl": lambda: fetch_ensembl_genomes(tax_id, stop_event=stop_event),
+        "ENA": lambda: fetch_ena_genomes(tax_id, stop_event=stop_event),
         "BV-BRC": lambda: fetch_bvbrc_genomes(
-            tax_id, max_records=max_bvbrc_records
+            tax_id,
+            max_records=max_bvbrc_records,
+            progress_callback=lambda current, total: _emit_progress(
+                "BV-BRC", current, total
+            ),
+            stop_event=stop_event,
         ),
     }
 

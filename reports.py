@@ -25,6 +25,101 @@ def normalize_assembly(level):
     return mapping.get(level, level.title())
 
 
+def _clean_geo_text(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered in {"unknown", "none", "null", "na", "n/a", "not provided"}:
+        return ""
+    return text
+
+
+def _split_country_region(location):
+    text = _clean_geo_text(location)
+    if not text:
+        return "", ""
+
+    parts = [p.strip() for p in text.replace(";", ":").split(":") if p.strip()]
+    if not parts:
+        return "", ""
+
+    country = parts[0]
+    region = ": ".join(parts[1:]) if len(parts) > 1 else ""
+    return country, region
+
+
+def summarize_geography(genomes, top_n=None):
+    region_counts = Counter()
+    source_region_counts = defaultdict(Counter)
+    total = len(genomes)
+    geo_covered = 0
+    coords_covered = 0
+
+    for g in genomes:
+        country = _clean_geo_text(g.get("Country"))
+        region = _clean_geo_text(g.get("Region"))
+        location = _clean_geo_text(g.get("Collection Location"))
+        latitude = _clean_geo_text(g.get("Latitude"))
+        longitude = _clean_geo_text(g.get("Longitude"))
+
+        if not country and location:
+            inferred_country, inferred_region = _split_country_region(location)
+            country = country or inferred_country
+            region = region or inferred_region
+
+        # Bundle by country only (extract country from "Country - Region" format if needed)
+        if country:
+            region_label = country
+        elif region:
+            region_label = region
+        elif location:
+            # Extract country from location string
+            inferred_country, _ = _split_country_region(location)
+            region_label = inferred_country if inferred_country else location
+        else:
+            region_label = ""
+
+        # Skip entries with "missing", "not determined", or anything starting with "not"
+        if region_label and "missing" not in region_label.lower() and not region_label.lower().startswith("not"):
+            if region_label or latitude or longitude:
+                geo_covered += 1
+
+            if latitude and longitude:
+                coords_covered += 1
+
+            region_counts[region_label] += 1
+            source_region_counts[g.get("Source") or "Unknown"][region_label] += 1
+        elif region_label or latitude or longitude:
+            # Still count geo_covered if we have coordinates, even if region is missing
+            geo_covered += 1
+            if latitude and longitude:
+                coords_covered += 1
+
+    region_covered = sum(region_counts.values())
+    missing_region = max(total - region_covered, 0)
+
+    source_region_covered = {
+        source: sum(counts.values()) for source, counts in source_region_counts.items()
+    }
+
+    return {
+        "total": total,
+        "geo_covered": geo_covered,
+        "coords_covered": coords_covered,
+        "region_covered": region_covered,
+        "missing_region": missing_region,
+        "top_regions": region_counts.most_common(top_n),
+        "source_region_covered": source_region_covered,
+        "top_regions_by_source": {
+            source: counts.most_common(top_n)
+            for source, counts in source_region_counts.items()
+        },
+    }
+
+
 def _write_genome_csv(path, genomes):
     cols = (
         "Accession",
@@ -118,6 +213,17 @@ def _write_html_report(path, genomes, taxid=None, taxonomy_data=None, open_after
 
     # build charts
     source_counts = Counter(g.get("Source") or "Unknown" for g in report_genomes)
+    total = len(report_genomes)
+    geography = summarize_geography(report_genomes)
+    all_regions = geography["top_regions"]
+    top_regions = all_regions[:10]
+    other_count = sum(count for _, count in all_regions[10:])
+    display_regions = list(top_regions)
+    if other_count > 0:
+        display_regions.append(("Other", other_count))
+    region_denom = geography["region_covered"] or 1
+    missing_region_pct = (geography["missing_region"] / total * 100) if total else 0.0
+    region_coverage_pct = (geography["region_covered"] / total * 100) if total else 0.0
     colors = {
         "NCBI": "#d62728",
         "REFSEQ": "#d62728",
@@ -175,7 +281,7 @@ def _write_html_report(path, genomes, taxid=None, taxonomy_data=None, open_after
             continue
 
     if seq_data:
-        ax3 = fig.add_subplot(212)
+        ax3 = fig.add_subplot(223)
         all_lengths = [x[0] for x in seq_data]
         bins = np.histogram_bin_edges(all_lengths, bins="auto")
         for source in sources:
@@ -192,12 +298,30 @@ def _write_html_report(path, genomes, taxid=None, taxonomy_data=None, open_after
         ax3.set_ylabel("Count")
         ax3.legend()
 
+    # Geographic Distribution
+    if display_regions:
+        ax4 = fig.add_subplot(224)
+        regions_list = display_regions
+        region_names = [r[0] for r in regions_list]
+        region_counts = [r[1] for r in regions_list]
+        
+        # Reverse order so largest is at top
+        region_names = region_names[::-1]
+        region_counts = region_counts[::-1]
+        
+        bars = ax4.barh(region_names, region_counts, color="#2ca02c")
+        
+        # Add numeric labels on bars
+        for i, (bar, count) in enumerate(zip(bars, region_counts)):
+            ax4.text(count, i, f" {count}", va="center")
+        
+        ax4.set_title("Top 10 Countries + Other")
+
     fig.tight_layout(pad=3.0)
 
     img_data = _figure_to_base64(fig)
     taxonomy_html = _build_taxonomy_html(taxonomy_data)
 
-    total = len(report_genomes)
     accessions = [g.get("Accession") for g in report_genomes if g.get("Accession")]
     unique_accessions = len(set(accessions))
     duplicates = total - unique_accessions
@@ -255,6 +379,28 @@ def _write_html_report(path, genomes, taxid=None, taxonomy_data=None, open_after
     <ul>
       {''.join(f'<li>{src}: {cnt}</li>' for src, cnt in source_counts.items())}
     </ul>
+        <p>Records without region metadata: {geography['missing_region']} / {geography['total']} ({missing_region_pct:.1f}%)</p>
+        <p>Records with region metadata: {geography['region_covered']} / {geography['total']} ({region_coverage_pct:.1f}%)</p>
+        <p>Top 10 collection countries + Other (share among records with region metadata):</p>
+        <ul>
+            {''.join(f'<li>{region}: {count / region_denom * 100:.1f}%</li>' for region, count in display_regions) if display_regions else '<li>No geographic metadata available.</li>'}
+        </ul>
+        <p>Collection regions by database:</p>
+        <ul>
+            {''.join(
+                f"<li>{source} ({geography['source_region_covered'].get(source, 0)} with region metadata)<ul>"
+                + (
+                        ''.join(
+                                f'<li>{region}: {count / geography["source_region_covered"].get(source, 1) * 100:.1f}%</li>'
+                                for region, count in geography['top_regions_by_source'].get(source, [])
+                        )
+                        if geography['top_regions_by_source'].get(source, []) and geography['source_region_covered'].get(source, 0)
+                        else '<li>No geographic metadata available.</li>'
+                )
+                + '</ul></li>'
+                for source in sorted(source_counts.keys())
+            )}
+        </ul>
   </div>
     <div class="section">
         <h2>Taxonomy</h2>
