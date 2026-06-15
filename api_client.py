@@ -3,21 +3,78 @@ import time
 import os
 import logging
 import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from queue import Queue, Empty
 import threading
 import time
-import ssl
-
-ssl._create_default_https_context = ssl._create_unverified_context
 
 BASE_URL_NCBI = "https://api.ncbi.nlm.nih.gov/datasets/v2"
 BASE_URL_ENA = "https://www.ebi.ac.uk/ena/portal/api/search"
 BASE_URL_BVBRC = "https://www.bv-brc.org/api"
 
 BASE_URL_ENSEMBL = "https://rest.ensembl.org"
-NCBI_API_KEY = "ad05b3160b82232233a302e84033a1eb8307"
+
+# NCBI API key is supplied at runtime (e.g. from the GUI), not hardcoded.
+# Empty string means "no key": NCBI then allows only 3 requests/second, so we
+# throttle accordingly. With a key the limit rises to 10 req/sec, which is high
+# enough that we keep the existing concurrent behaviour (no throttling).
+NCBI_API_KEY = ""
+
+# Rate limit (requests/second) applied to NCBI requests when no API key is set.
+NCBI_RATE_LIMIT_NO_KEY = 3
+
 NCBI_PAGE_SIZE = 1000
+
+
+class _RateLimiter:
+    """Thread-safe minimum-interval limiter shared across worker threads.
+
+    A rate of 0 (or less) disables throttling entirely.
+    """
+
+    def __init__(self, max_per_second):
+        self._lock = threading.Lock()
+        self._next_time = 0.0
+        self.set_rate(max_per_second)
+
+    def set_rate(self, max_per_second):
+        with self._lock:
+            self._min_interval = 1.0 / max_per_second if max_per_second and max_per_second > 0 else 0.0
+
+    def acquire(self, stop_event=None):
+        """Block until the next request slot is available."""
+        with self._lock:
+            if self._min_interval <= 0:
+                return
+            now = time.monotonic()
+            if now >= self._next_time:
+                self._next_time = now + self._min_interval
+                wait = 0.0
+            else:
+                wait = self._next_time - now
+                self._next_time += self._min_interval
+        if wait > 0:
+            if stop_event is not None:
+                stop_event.wait(wait)
+            else:
+                time.sleep(wait)
+
+
+# Throttle only NCBI; the other sources answer in a single (or few) request(s).
+# Default to the no-key limit until a key is supplied via set_ncbi_api_key.
+_ncbi_rate_limiter = _RateLimiter(NCBI_RATE_LIMIT_NO_KEY)
+
+
+def set_ncbi_api_key(api_key):
+    """Set (or clear) the NCBI API key and adjust the NCBI rate limit.
+
+    With a key, NCBI permits 10 req/sec, so throttling is disabled and the
+    existing concurrent fetch behaviour is preserved. Without a key, requests
+    are limited to NCBI_RATE_LIMIT_NO_KEY (3) per second.
+    """
+    global NCBI_API_KEY
+    NCBI_API_KEY = (api_key or "").strip()
+    _ncbi_rate_limiter.set_rate(0 if NCBI_API_KEY else NCBI_RATE_LIMIT_NO_KEY)
 
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -65,6 +122,10 @@ def fetch_json_from_api(
     for attempt in range(retries):
         if stop_event and stop_event.is_set():
             return None
+        if database == "NCBI":
+            _ncbi_rate_limiter.acquire(stop_event)
+            if stop_event and stop_event.is_set():
+                return None
         try:
             response = requests.get(url, headers=headers, params=params, timeout=30)
             response.raise_for_status()
@@ -108,6 +169,10 @@ def fetch_json_and_headers_from_api(
     for attempt in range(retries):
         if stop_event and stop_event.is_set():
             return None, {}
+        if database == "NCBI":
+            _ncbi_rate_limiter.acquire(stop_event)
+            if stop_event and stop_event.is_set():
+                return None, {}
         try:
             response = requests.get(url, headers=headers, params=params, timeout=30)
             response.raise_for_status()

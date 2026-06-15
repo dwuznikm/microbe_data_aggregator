@@ -446,8 +446,8 @@ def _write_html_report(path, genomes, taxid=None, taxonomy_data=None, open_after
 
 
 def _export_results(export_dir, taxid, genomes, taxonomy_data=None):
-    from datetime import datetime
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    from datetime import datetime, timezone
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     base_name = f"genome_report_{taxid or 'unknown'}_{timestamp}"
     csv_path = os.path.join(export_dir, f"{base_name}.csv")
     html_path = os.path.join(export_dir, f"{base_name}.html")

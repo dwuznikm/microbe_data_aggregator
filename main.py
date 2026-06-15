@@ -113,6 +113,23 @@ class GenomeApp(tk.Tk):
             side="left", padx=6
         )
 
+        # --- Optional NCBI API key ---
+        apikey_frame = ttk.Frame(self.search_frame)
+        apikey_frame.pack(pady=(4, 0))
+        ttk.Label(apikey_frame, text="NCBI API key (optional):").pack()
+        self.apikey_entry = ttk.Entry(apikey_frame, width=44, show="*")
+        self.apikey_entry.pack(pady=(2, 2))
+        ttk.Label(
+            apikey_frame,
+            text=(
+                "Leave blank to use NCBI at the default 3 requests/second limit.\n"
+                "Provide a personal key to raise the limit (10 req/s) for faster,\n"
+                "more reliable searches."
+            ),
+            foreground="gray",
+            justify="center",
+        ).pack()
+
         # Search controls
         controls_frame = ttk.Frame(self.search_frame)
         controls_frame.pack(pady=16)
@@ -264,12 +281,21 @@ class GenomeApp(tk.Tk):
         self.gene_table.bind("<Double-1>", self.on_gene_double_click)
 
     # ---------- Initial Search ----------
+    def _apply_ncbi_api_key(self):
+        """Push the API key from the GUI into the client before any request.
+
+        An empty field throttles NCBI to 3 req/s; a filled-in key keeps the
+        faster concurrent behaviour (10 req/s).
+        """
+        api_client.set_ncbi_api_key(self.apikey_entry.get())
+
     def on_search_button(self):
         taxid_str = self.taxid_entry.get().strip()
         if not taxid_str.isdigit():
             messagebox.showerror("Invalid Input", "Please enter a numeric Taxonomy ID.")
             return
         taxid = int(taxid_str)
+        self._apply_ncbi_api_key()
 
         auto_export = self.auto_export_var.get()
         export_dir = None
@@ -818,6 +844,7 @@ class GenomeApp(tk.Tk):
             return
 
         taxid = int(taxid_str)
+        self._apply_ncbi_api_key()
 
         sources = []
         if self.ensembl_var.get():
@@ -881,20 +908,6 @@ class GenomeApp(tk.Tk):
                 ),
             )
         self.adjust_column_widths(self.gene_table)
-
-    def normalize_assembly(self, level):
-        if not level:
-            return "Unknown"
-
-        level = level.strip().lower().replace("_", " ")
-
-        mapping = {
-            "complete genome": "Complete Genome",
-            "chromosome": "Chromosome",
-            "scaffold": "Scaffold",
-            "contig": "Contig",
-            "primary assembly": "Primary Assembly",
-        }
 
     def update_summary(self):
         if not self.genome_data:
